@@ -8,7 +8,7 @@
 set -euo pipefail
 
 VAULT="$HOME/vault/houjinzei"
-LOG_DIR="$VAULT/99_logs"
+LOG_DIR="$VAULT/logs"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/stage2_${RUN_TS}.log"
 
