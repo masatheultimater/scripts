@@ -71,7 +71,7 @@ GEMINI_RAW="$EXTRACTED_DIR/${SAFE_NAME}_gemini_raw.md"
 PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
 # Gemini CLI 実行
-gemini -f "$PDF_PATH" "$PROMPT_CONTENT" > "$GEMINI_RAW" 2>&1
+timeout 300 gemini -p "$(printf '以下のPDFファイルを読み込んで分析してください: %s\n\n%s' "$PDF_PATH" "$PROMPT_CONTENT")" --include-directories "$(dirname "$PDF_PATH")" --yolo -o text > "$GEMINI_RAW" 2>&1
 
 # Geminiの出力からMarkdownとJSONを分離
 # JSON部分を抽出（```json ... ``` ブロック）
