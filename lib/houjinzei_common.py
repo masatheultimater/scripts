@@ -1,0 +1,121 @@
+"""法人税学習システム共通モジュール
+
+全スクリプトで共有する定数・frontmatter I/O・ユーティリティ関数。
+"""
+
+import os
+import re
+import sys
+import tempfile
+from datetime import date, datetime
+from pathlib import Path
+
+import yaml
+
+# ─── 定数 ───────────────────────────────────────────────
+
+# stage: 学習進捗（frontmatter "stage" フィールド）
+STAGE_VALUES = ("未着手", "学習中", "復習中", "卒業済")
+
+# status: ライフサイクル（frontmatter "status" フィールド）
+STATUS_VALUES = ("未着手", "学習中", "復習中", "卒業")
+
+# 出題・集計から除外すべき status
+EXCLUDED_STATUSES = frozenset({"卒業"})
+
+# 卒業判定パラメータ
+GRADUATION_GAP_DAYS = 25
+GRADUATION_MIN_KOME = 4
+KOME_THRESHOLD_REVIEW = 16  # kome_total >= 16 で stage=復習中
+
+VAULT_DEFAULT = Path(os.environ.get("VAULT", "")).expanduser() or Path.home() / "vault" / "houjinzei"
+TOPIC_DIR_NAME = "10_論点"
+LOCKFILE = "/tmp/houjinzei_vault.lock"
+
+
+# ─── ユーティリティ ─────────────────────────────────────
+
+def eprint(msg: str) -> None:
+    """標準エラー出力にメッセージを出力する。"""
+    print(msg, file=sys.stderr)
+
+
+def parse_date(s: str) -> date:
+    """YYYY-MM-DD 文字列を date に変換する。"""
+    s = str(s).strip()
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError(f"日付形式エラー: {s} (YYYY-MM-DD で指定してください)")
+
+
+def to_int(v) -> int:
+    """安全に int 変換。失敗時は 0 を返す。"""
+    try:
+        return int(str(v).strip())
+    except (ValueError, TypeError):
+        return 0
+
+
+# ─── Frontmatter I/O ───────────────────────────────────
+
+def split_frontmatter(content: str):
+    """Markdown から frontmatter テキストと body を分離する。
+
+    Returns:
+        (frontmatter_text, body) — frontmatter がなければ (None, content)
+    """
+    if not content.startswith("---\n"):
+        return None, content
+
+    marker = "\n---\n"
+    end = content.find(marker, 4)
+    if end == -1:
+        return None, content
+
+    return content[4:end], content[end + len(marker):]
+
+
+def read_frontmatter(md_path: Path):
+    """Markdown ファイルの frontmatter を yaml.safe_load でパースする。
+
+    Returns:
+        (dict, body_str) — frontmatter がなければ ({}, body_str)
+    """
+    text = md_path.read_text(encoding="utf-8")
+    fm_text, body = split_frontmatter(text)
+    if fm_text is None:
+        return {}, body
+
+    parsed = yaml.safe_load(fm_text)
+    if not isinstance(parsed, dict):
+        return {}, body
+    return parsed, body
+
+
+def write_frontmatter(md_path: Path, data: dict, body: str) -> None:
+    """frontmatter + body を atomic に書き出す（tempfile + rename）。"""
+    dumped = yaml.safe_dump(
+        data,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+        width=10000,
+    )
+
+    new_body = body if body.startswith("\n") else "\n" + body
+    new_content = f"---\n{dumped}---{new_body}"
+
+    # atomic write: 同ディレクトリに tempfile → rename
+    parent = md_path.parent
+    fd, tmp_path = tempfile.mkstemp(dir=parent, suffix=".tmp", prefix=".fm_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        os.replace(tmp_path, str(md_path))
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise

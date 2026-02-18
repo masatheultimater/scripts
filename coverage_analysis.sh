@@ -38,10 +38,11 @@ export VAULT DATE_ARG
 
 python3 - <<'PY'
 import os
-import re
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
+
+import yaml
 
 VAULT = Path(os.environ["VAULT"])
 DATE_ARG = os.environ.get("DATE_ARG", "").strip()
@@ -49,7 +50,7 @@ TOPIC_ROOT = VAULT / "10_論点"
 SOURCE_ROOT = VAULT / "30_ソース別"
 OUTPUT_ROOT = VAULT / "40_分析" / "カバレッジ"
 
-VALID_STAGES = ["未着手", "学習中", "復習中", "卒業"]
+VALID_STAGES = ["未着手", "学習中", "復習中", "卒業済"]
 VALID_IMPORTANCE = ["A", "B", "C"]
 
 
@@ -64,42 +65,28 @@ def parse_date(s: str) -> date:
         raise ValueError(f"日付形式エラー: {s} (YYYY-MM-DD で指定してください)")
 
 
-def unquote(v: str) -> str:
-    v = v.strip()
-    if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
-        return v[1:-1].strip()
-    return v
-
-
 def parse_frontmatter(md_path: Path) -> dict:
     try:
-        text = md_path.read_text(encoding="utf-8", errors="ignore")
+        text = md_path.read_text(encoding="utf-8")
     except OSError:
         return {}
 
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    if not text.startswith("---\n"):
         return {}
-
-    data = {}
-    for line in lines[1:]:
-        if line.strip() == "---":
-            break
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        m = re.match(r"^([A-Za-z0-9_\-]+)\s*:\s*(.*)$", line)
-        if not m:
-            continue
-        key = m.group(1).strip()
-        val = unquote(m.group(2))
-        data[key] = val
-    return data
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return {}
+    try:
+        parsed = yaml.safe_load(text[4:end])
+    except yaml.YAMLError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def as_int(v) -> int:
     try:
         return int(str(v).strip())
-    except Exception:
+    except (ValueError, TypeError):
         return 0
 
 
@@ -149,12 +136,12 @@ for md in sorted(TOPIC_ROOT.rglob("*.md")):
     rel = md.relative_to(TOPIC_ROOT).as_posix()
     category_default = rel.split("/")[0] if "/" in rel else "未分類"
 
-    topic_name = fm.get("topic", "").strip() or md.stem
-    category = fm.get("category", "").strip() or category_default
-    stage = fm.get("stage", "").strip()
-    importance = fm.get("importance", "").strip()
+    topic_name = str(fm.get("topic", "") or "").strip() or md.stem
+    category = str(fm.get("category", "") or "").strip() or category_default
+    stage = str(fm.get("stage", "") or "").strip()
+    importance = str(fm.get("importance", "") or "").strip()
     kome_total = as_int(fm.get("kome_total", 0))
-    sources_raw = fm.get("sources", "").strip()
+    sources_raw = str(fm.get("sources", "") or "").strip()
 
     stat = cat_stats[category]
     stat["total"] += 1
@@ -197,9 +184,9 @@ for md in sorted(SOURCE_ROOT.rglob("*.md")):
     if not fm:
         continue
 
-    source_name = fm.get("source_name", "").strip() or md.stem
-    source_type = fm.get("source_type", "").strip() or "-"
-    publisher = fm.get("publisher", "").strip() or "-"
+    source_name = str(fm.get("source_name", "") or "").strip() or md.stem
+    source_type = str(fm.get("source_type", "") or "").strip() or "-"
+    publisher = str(fm.get("publisher", "") or "").strip() or "-"
     total_problems = as_int(fm.get("total_problems", 0))
     covered = as_int(fm.get("covered", 0))
 
@@ -242,7 +229,7 @@ lines.append(f"- 着手率: {overall_start_rate}")
 lines.append(f"- カテゴリ数: {category_count}")
 lines.append("")
 lines.append("## カテゴリ別進捗")
-lines.append("| カテゴリ | 総数 | 未着手 | 学習中 | 復習中 | 卒業 | 着手率 | 平均コメ |")
+lines.append("| カテゴリ | 総数 | 未着手 | 学習中 | 復習中 | 卒業済 | 着手率 | 平均コメ |")
 lines.append("|----------|------|--------|--------|--------|------|--------|----------|")
 
 for category in sorted(cat_stats.keys()):
@@ -251,7 +238,7 @@ for category in sorted(cat_stats.keys()):
     not_started = s["stages"].get("未着手", 0)
     learning = s["stages"].get("学習中", 0)
     reviewing = s["stages"].get("復習中", 0)
-    graduated = s["stages"].get("卒業", 0)
+    graduated = s["stages"].get("卒業済", 0)
     started = total - not_started
     start_rate = pct(started, total)
     avg_kome = f"{(s['kome_sum'] / total):.1f}" if total > 0 else "0.0"

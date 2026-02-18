@@ -52,13 +52,19 @@ fi
 VAULT="${HOME}/vault/houjinzei"
 export VAULT DATE_ARG LIMIT_ARG
 
+# ファイルロック（並行実行対策）
+LOCKFILE="/tmp/houjinzei_vault.lock"
+exec 200>"$LOCKFILE"
+flock -n 200 || { echo "エラー: 別のスクリプトが実行中です" >&2; exit 1; }
+
 python3 - <<'PY'
 import json
 import os
-import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from collections import Counter
+
+import yaml
 
 VAULT = Path(os.environ["VAULT"])
 DATE_ARG = os.environ.get("DATE_ARG", "").strip()
@@ -79,39 +85,24 @@ def parse_date(s: str) -> date:
         raise ValueError(f"日付形式エラー: {s} (YYYY-MM-DD で指定してください)")
 
 
-def unquote(v: str) -> str:
-    v = v.strip()
-    if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
-        return v[1:-1].strip()
-    return v
-
-
 def parse_frontmatter(md_path: Path) -> dict:
-    text = md_path.read_text(encoding="utf-8", errors="ignore")
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    text = md_path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
         return {}
-
-    fm = {}
-    for i in range(1, len(lines)):
-        line = lines[i]
-        if line.strip() == "---":
-            break
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        m = re.match(r"^([A-Za-z0-9_\-]+)\s*:\s*(.*)$", line)
-        if not m:
-            continue
-        key = m.group(1).strip()
-        value = unquote(m.group(2))
-        fm[key] = value
-    return fm
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return {}
+    try:
+        parsed = yaml.safe_load(text[4:end])
+    except yaml.YAMLError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
-def to_int(v: str) -> int:
+def to_int(v) -> int:
     try:
         return int(str(v).strip())
-    except Exception:
+    except (ValueError, TypeError):
         return 0
 
 
@@ -127,19 +118,22 @@ for md in sorted(TOPIC_ROOT.rglob("*.md")):
     if not fm:
         continue
 
-    topic_name = fm.get("topic", "").strip() or md.stem
-    category = fm.get("category", "").strip()
-    importance = fm.get("importance", "").strip()
-    stage = fm.get("stage", "").strip()
-    last_practiced_raw = fm.get("last_practiced", "").strip()
-    status = fm.get("status", "").strip()
+    topic_name = str(fm.get("topic", "") or "").strip() or md.stem
+    category = str(fm.get("category", "") or "").strip()
+    importance = str(fm.get("importance", "") or "").strip()
+    stage = str(fm.get("stage", "") or "").strip()
+    last_practiced_raw = fm.get("last_practiced")
+    status = str(fm.get("status", "") or "").strip()
 
     last_practiced = None
-    if last_practiced_raw:
-        try:
-            last_practiced = parse_date(last_practiced_raw)
-        except ValueError:
-            last_practiced = None
+    if last_practiced_raw is not None:
+        if isinstance(last_practiced_raw, date):
+            last_practiced = last_practiced_raw
+        else:
+            try:
+                last_practiced = parse_date(str(last_practiced_raw))
+            except ValueError:
+                last_practiced = None
 
     rel = md.relative_to(TOPIC_ROOT).as_posix()
     topic_id = rel[:-3] if rel.endswith(".md") else rel

@@ -241,7 +241,10 @@ def update_topic_note(path: Path, topic_result, session_date: str):
     # --- stage / status 更新 ---
     current_status = data.get("status", "未着手")
 
-    if topic_result["correct"]:
+    # 卒業済みノートは stage/status を巻き戻さない
+    if current_status == "卒業":
+        data["stage"] = data.get("stage", "卒業済")
+    elif topic_result["correct"]:
         data["stage"] = "復習中" if new_kome >= 16 else "学習中"
 
         # status 遷移
@@ -262,11 +265,8 @@ def update_topic_note(path: Path, topic_result, session_date: str):
             except ValueError:
                 pass
     else:
-        # 不正解時: 卒業取消・ステータス補正
-        if current_status == "卒業":
-            data["status"] = "復習中"
-            data["stage"] = "復習中"
-        elif current_status == "未着手":
+        # 不正解時: ステータス補正
+        if current_status == "未着手":
             data["status"] = "学習中"
             data["stage"] = "学習中"
 

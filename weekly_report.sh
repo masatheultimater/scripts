@@ -191,7 +191,7 @@ def parse_result_cell(value: str):
 
 # 1) 10_論点 集計
 topic_files = list_markdown_files(TOPIC_ROOT)
-stage_counts = {"未着手": 0, "学習中": 0, "復習中": 0, "卒業": 0}
+stage_counts = {"未着手": 0, "学習中": 0, "復習中": 0, "卒業済": 0}
 importance_counts = {"A": 0, "B": 0, "C": 0}
 practiced_this_week = []
 newly_started = []
@@ -241,7 +241,7 @@ for path in topic_files:
     if is_new:
         newly_started.append(topic)
 
-    if stage != "卒業":
+    if stage != "卒業済":
         weak_candidates.append(
             {
                 "topic": topic,
@@ -373,7 +373,7 @@ lines.extend(
         f"- 着手済み: {started_count} ({started_ratio})",
         f"- 学習中: {stage_counts['学習中']}",
         f"- 復習中: {stage_counts['復習中']}",
-        f"- 卒業: {stage_counts['卒業']}",
+        f"- 卒業済: {stage_counts['卒業済']}",
         f"- 重要度分布: A={importance_counts['A']} / B={importance_counts['B']} / C={importance_counts['C']}",
         f"- 今週演習した論点数: {len(set(practiced_this_week))}",
         "",
