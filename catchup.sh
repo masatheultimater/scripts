@@ -40,6 +40,13 @@ else
   log "出題リストは生成済み ($TODAY)"
 fi
 
+# --- 1.5. コメコメ Gist pull（未処理の結果があれば writeback） ---
+if [[ -f "$SCRIPTS_DIR/komekome_sync.sh" ]]; then
+  log "コメコメ Gist pull 開始"
+  bash "$SCRIPTS_DIR/komekome_sync.sh" pull 2>&1 | tee -a "$CATCHUP_LOG" || true
+  log "コメコメ Gist pull 完了"
+fi
+
 # --- 2. 週次バッチ（日曜に実行されるべき3スクリプト） ---
 # 最新の週次レポートが7日以上前なら再実行
 REPORT_DIR="$VAULT/40_分析/週次レポート"

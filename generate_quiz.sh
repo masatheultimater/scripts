@@ -274,3 +274,7 @@ if reason_count:
 else:
     print("内訳: 対象なし")
 PY
+
+# Gist同期（失敗してもquiz生成は成功扱い）
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -f "$SCRIPTS_DIR/komekome_sync.sh" ]] && bash "$SCRIPTS_DIR/komekome_sync.sh" push 2>&1 || true
