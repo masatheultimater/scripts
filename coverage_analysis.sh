@@ -36,6 +36,11 @@ done
 VAULT="${HOME}/vault/houjinzei"
 export VAULT DATE_ARG
 
+# ファイルロック（並行実行対策）
+LOCKFILE="/tmp/houjinzei_vault.lock"
+exec 200>"$LOCKFILE"
+flock -w 30 200 || { echo "エラー: ロック取得タイムアウト" >&2; exit 1; }
+
 python3 - <<'PY'
 import os
 from collections import defaultdict
@@ -50,8 +55,19 @@ TOPIC_ROOT = VAULT / "10_論点"
 SOURCE_ROOT = VAULT / "30_ソース別"
 OUTPUT_ROOT = VAULT / "40_分析" / "カバレッジ"
 
-VALID_STAGES = ["未着手", "学習中", "復習中", "卒業済"]
+VALID_STAGES = ("未着手", "学習中", "復習中", "卒業済")
 VALID_IMPORTANCE = ["A", "B", "C"]
+
+
+def normalize_stage(raw_stage: str, status: str) -> str:
+    """stage を正規化。欠損時は status から推定する。"""
+    if raw_stage in VALID_STAGES:
+        return raw_stage
+    if status == "卒業":
+        return "卒業済"
+    if status in ("未着手", "学習中", "復習中"):
+        return status
+    return "未着手"
 
 
 def eprint(msg: str) -> None:
@@ -138,7 +154,9 @@ for md in sorted(TOPIC_ROOT.rglob("*.md")):
 
     topic_name = str(fm.get("topic", "") or "").strip() or md.stem
     category = str(fm.get("category", "") or "").strip() or category_default
-    stage = str(fm.get("stage", "") or "").strip()
+    raw_stage = str(fm.get("stage", "") or "").strip()
+    status = str(fm.get("status", "") or "").strip()
+    stage = normalize_stage(raw_stage, status)
     importance = str(fm.get("importance", "") or "").strip()
     kome_total = as_int(fm.get("kome_total", 0))
     sources_raw = str(fm.get("sources", "") or "").strip()

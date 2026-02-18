@@ -4,7 +4,6 @@
 """
 
 import os
-import re
 import sys
 import tempfile
 from datetime import date, datetime
@@ -55,6 +54,41 @@ def to_int(v) -> int:
         return int(str(v).strip())
     except (ValueError, TypeError):
         return 0
+
+
+# ─── Stage / Status ロジック ─────────────────────────────
+
+def compute_stage(status: str, kome_total: int, calc_correct: int, calc_wrong: int) -> str:
+    """status と累計値から stage を算出する（全スクリプト共通基準）。
+
+    - status=="卒業" → "卒業済"
+    - kome_total >= 16 or status=="復習中" → "復習中"
+    - 学習実績あり（kome_total>0 or attempts>0） → "学習中"
+    - それ以外 → "未着手"
+    """
+    if status == "卒業":
+        return "卒業済"
+    attempts = calc_correct + calc_wrong
+    if kome_total >= KOME_THRESHOLD_REVIEW or status == "復習中":
+        return "復習中"
+    if kome_total > 0 or attempts > 0:
+        return "学習中"
+    return "未着手"
+
+
+def normalize_stage(raw_stage: str, status: str) -> str:
+    """frontmatter の stage 値を正規化する（集計用）。
+
+    stage が欠損・不正な場合、status から推定する。
+    """
+    if raw_stage in STAGE_VALUES:
+        return raw_stage
+    # stage 欠損時: status からマッピング
+    if status == "卒業":
+        return "卒業済"
+    if status in ("未着手", "学習中", "復習中"):
+        return status
+    return "未着手"
 
 
 # ─── Frontmatter I/O ───────────────────────────────────

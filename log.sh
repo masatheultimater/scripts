@@ -55,8 +55,9 @@ elif [ "${#EXACT_MATCHES[@]}" -gt 1 ]; then
 else
   mapfile -t FUZZY_MATCHES < <(python3 - "$TOPIC_ROOT" "$TOPIC_INPUT" <<'PY'
 import os
-import re
 import sys
+
+import yaml
 
 root = sys.argv[1]
 keyword = sys.argv[2]
@@ -65,27 +66,25 @@ keyword = sys.argv[2]
 def extract_topic(path: str) -> str:
     try:
         with open(path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+            text = f.read()
     except OSError:
         return ""
 
-    if not lines or lines[0].strip() != "---":
+    if not text.startswith("---\n"):
         return ""
-
-    for line in lines[1:]:
-        if line.strip() == "---":
-            break
-        m = re.match(r"^topic:\s*(.*)$", line.strip())
-        if m:
-            value = m.group(1).strip()
-            if (value.startswith("\"") and value.endswith("\"")) or (value.startswith("'") and value.endswith("'")):
-                value = value[1:-1]
-            return value
-    return ""
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return ""
+    try:
+        fm = yaml.safe_load(text[4:end]) or {}
+    except yaml.YAMLError:
+        return ""
+    topic = fm.get("topic")
+    return str(topic).strip() if isinstance(topic, str) and topic.strip() else ""
 
 for dirpath, _, filenames in os.walk(root):
     for name in filenames:
-        if not name.endswith(".md"):
+        if not name.endswith(".md") or name in ("README.md", "CLAUDE.md"):
             continue
         path = os.path.join(dirpath, name)
         topic = extract_topic(path)
@@ -125,24 +124,24 @@ fi
 if [ -z "$TOPIC_NAME" ]; then
   TOPIC_NAME="$(python3 - "$TOPIC_PATH" <<'PY'
 import os
-import re
 import sys
+
+import yaml
 
 path = sys.argv[1]
 
 topic = ""
 try:
     with open(path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    if lines and lines[0].strip() == "---":
-        for line in lines[1:]:
-            if line.strip() == "---":
-                break
-            m = re.match(r"^topic:\s*(.*)$", line.strip())
-            if m:
-                topic = m.group(1).strip().strip("'\"")
-                break
-except OSError:
+        text = f.read()
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end != -1:
+            fm = yaml.safe_load(text[4:end]) or {}
+            t = fm.get("topic")
+            if isinstance(t, str) and t.strip():
+                topic = t.strip()
+except Exception:
     pass
 
 if not topic:
@@ -186,6 +185,8 @@ printf '| %s | %s | %s | %s | %s |\n' "$NOW" "$TOPIC_CELL" "$PROBLEM_CELL" "$RES
 UPDATE_OUTPUT="$(python3 - "$TOPIC_PATH" "$RESULT" "$MEMO" "$TODAY" <<'PY'
 import os
 import sys
+import tempfile
+
 import yaml
 
 path = sys.argv[1]
@@ -193,34 +194,33 @@ result = sys.argv[2]
 memo = sys.argv[3]
 today = sys.argv[4]
 
+# --- 定数（houjinzei_common.py と同一） ---
+KOME_THRESHOLD = 16
+
 with open(path, "r", encoding="utf-8") as f:
     text = f.read()
 
-lines = text.splitlines(keepends=True)
 fm_data = {}
 body = text
 
-if lines and lines[0].strip() == "---":
-    end = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            end = i
-            break
-    if end is not None:
-        fm_text = "".join(lines[1:end])
+if text.startswith("---\n"):
+    end = text.find("\n---\n", 4)
+    if end != -1:
+        fm_text = text[4:end]
         parsed = yaml.safe_load(fm_text) if fm_text.strip() else {}
         fm_data = parsed if isinstance(parsed, dict) else {}
-        body = "".join(lines[end + 1:])
+        body = text[end + 5:]
 
 
 def as_int(v):
     try:
         return int(v)
-    except Exception:
+    except (ValueError, TypeError):
         return 0
 
 calc_correct = as_int(fm_data.get("calc_correct", 0))
 calc_wrong = as_int(fm_data.get("calc_wrong", 0))
+kome_total = as_int(fm_data.get("kome_total", 0))
 
 if result == "○":
     calc_correct += 1
@@ -240,23 +240,24 @@ if result == "×" and memo.strip():
     mistakes.append(memo.strip())
     fm_data["mistakes"] = mistakes
 
-# --- stage / status 更新（卒業保護付き） ---
+# --- stage / status 更新（卒業保護付き・kome_total 基準） ---
 current_status = fm_data.get("status", "未着手")
-attempts = calc_correct + calc_wrong
 
 if current_status == "卒業":
     # 卒業済みノートは stage/status を巻き戻さない
     stage = fm_data.get("stage", "卒業済")
 else:
-    if attempts == 0:
-        stage = "未着手"
-    elif attempts <= 3:
+    # kome_total ベースで stage 判定（komekome_writeback.sh と同一基準）
+    attempts = calc_correct + calc_wrong
+    if kome_total >= KOME_THRESHOLD or current_status == "復習中":
+        stage = "復習中"
+    elif kome_total > 0 or attempts > 0:
         stage = "学習中"
     else:
-        stage = "復習中"
+        stage = "未着手"
     fm_data["stage"] = stage
     # status 更新（未着手→学習中への遷移のみ）
-    if current_status == "未着手" and attempts > 0:
+    if current_status == "未着手" and (kome_total > 0 or attempts > 0):
         fm_data["status"] = "学習中"
 
 topic = fm_data.get("topic")
@@ -271,11 +272,23 @@ dumped = yaml.safe_dump(
     width=10000,
 ).rstrip()
 
-new_text = f"---\n{dumped}\n---\n{body}"
-with open(path, "w", encoding="utf-8") as f:
-    f.write(new_text)
+new_body = body if body.startswith("\n") else "\n" + body
+new_text = f"---\n{dumped}\n---{new_body}"
 
-print(f"{topic}\t{calc_correct}\t{calc_wrong}\t{attempts}\t{stage}")
+# atomic write
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp", prefix=".log_")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(new_text)
+    os.replace(tmp, path)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+
+print(f"{topic}\t{calc_correct}\t{calc_wrong}\t{calc_correct + calc_wrong}\t{stage}")
 PY
 )"
 

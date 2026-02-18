@@ -28,8 +28,10 @@ flock -n 200 || { echo "エラー: 別のスクリプトが実行中です" >&2;
 
 python3 - "$RESULTS_JSON" "$VAULT" <<'PYEOF'
 import json
+import os
 import re
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -143,11 +145,13 @@ def validate_input(data):
 
 
 def build_topic_index(notes_root: Path):
-    index = {}
+    """topic_id（パスベース）と topic フィールド値の両方でインデックスを構築する。"""
+    path_index = {}   # key: relative path without .md → Path
+    topic_index = {}  # key: topic field value → [Path, ...]
     parse_errors = []
 
     for path in notes_root.rglob("*.md"):
-        if path.name == "README.md":
+        if path.name in ("README.md", "CLAUDE.md"):
             continue
 
         try:
@@ -166,12 +170,17 @@ def build_topic_index(notes_root: Path):
             parse_errors.append(f"{path}: frontmatter解析失敗 ({e})")
             continue
 
+        # パスベースの topic_id（generate_quiz.sh と同じ形式）
+        rel = path.relative_to(notes_root).as_posix()
+        path_key = rel[:-3] if rel.endswith(".md") else rel
+        path_index[path_key] = path
+
+        # topic フィールド値（互換フォールバック用）
         topic = fm.get("topic")
         if isinstance(topic, str) and topic.strip():
-            topic_key = topic.strip()
-            index.setdefault(topic_key, []).append(path)
+            topic_index.setdefault(topic.strip(), []).append(path)
 
-    return index, parse_errors
+    return path_index, topic_index, parse_errors
 
 
 def write_session_log(log_path: Path, session_date: str, session_id: str, results):
@@ -238,28 +247,43 @@ def update_topic_note(path: Path, topic_result, session_date: str):
     old_last_practiced = data.get("last_practiced", "")
     data["last_practiced"] = session_date
 
+    # --- 定数 ---
+    KOME_THRESHOLD = 16
+    GRAD_GAP_DAYS = 25
+    GRAD_MIN_KOME = 4
+
     # --- stage / status 更新 ---
     current_status = data.get("status", "未着手")
+    calc_correct = data.get("calc_correct", 0)
+    calc_wrong = data.get("calc_wrong", 0)
+    try:
+        calc_correct = int(calc_correct) if calc_correct not in (None, "") else 0
+    except (ValueError, TypeError):
+        calc_correct = 0
+    try:
+        calc_wrong = int(calc_wrong) if calc_wrong not in (None, "") else 0
+    except (ValueError, TypeError):
+        calc_wrong = 0
 
     # 卒業済みノートは stage/status を巻き戻さない
     if current_status == "卒業":
         data["stage"] = data.get("stage", "卒業済")
     elif topic_result["correct"]:
-        data["stage"] = "復習中" if new_kome >= 16 else "学習中"
+        data["stage"] = "復習中" if new_kome >= KOME_THRESHOLD else "学習中"
 
         # status 遷移
         if current_status == "未着手":
             data["status"] = "学習中"
-        elif current_status == "学習中" and new_kome >= 16:
+        elif current_status == "学習中" and new_kome >= KOME_THRESHOLD:
             data["status"] = "復習中"
 
-        # 卒業判定（暫定: interval_index なし）
+        # 卒業判定
         if old_last_practiced and current_status == "復習中":
             try:
                 old_dt = datetime.strptime(str(old_last_practiced), "%Y-%m-%d")
                 new_dt = datetime.strptime(session_date, "%Y-%m-%d")
                 gap = (new_dt - old_dt).days
-                if gap >= 25 and new_kome >= 4:
+                if gap >= GRAD_GAP_DAYS and new_kome >= GRAD_MIN_KOME:
                     data["status"] = "卒業"
                     data["stage"] = "卒業済"
             except ValueError:
@@ -290,7 +314,19 @@ def update_topic_note(path: Path, topic_result, session_date: str):
 
     new_body = body if body.startswith("\n") else "\n" + body
     new_content = f"---\n{dumped}---{new_body}"
-    path.write_text(new_content, encoding="utf-8")
+
+    # atomic write
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp", prefix=".wb_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        os.replace(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 json_path = Path(sys.argv[1]).expanduser().resolve()
@@ -312,7 +348,7 @@ log_path = log_dir / f"{session_date}_{safe_session_id}.md"
 
 session_stats = write_session_log(log_path, session_date, session_id, results)
 
-topic_index, parse_errors = build_topic_index(notes_root)
+path_index, topic_index, parse_errors = build_topic_index(notes_root)
 
 updated_count = 0
 not_found = []
@@ -320,14 +356,21 @@ update_errors = []
 multiple_matches = []
 
 for result in results:
-    candidates = topic_index.get(result["topic_id"], [])
-    if not candidates:
-        not_found.append(result["topic_id"])
-        continue
+    tid = result["topic_id"]
 
-    target = sorted(candidates)[0]
-    if len(candidates) > 1:
-        multiple_matches.append((result["topic_id"], [str(p) for p in sorted(candidates)]))
+    # 1) パスベースで完全一致（generate_quiz.sh 出力形式）
+    target = path_index.get(tid)
+    if target:
+        pass  # found
+    else:
+        # 2) topic フィールド値で互換フォールバック
+        candidates = topic_index.get(tid, [])
+        if not candidates:
+            not_found.append(tid)
+            continue
+        target = sorted(candidates)[0]
+        if len(candidates) > 1:
+            multiple_matches.append((tid, [str(p) for p in sorted(candidates)]))
 
     try:
         update_topic_note(target, result, session_date)

@@ -25,11 +25,18 @@ else
   exit 1
 fi
 
+# ファイルロック（並行実行対策）
+LOCKFILE="/tmp/houjinzei_vault.lock"
+exec 200>"$LOCKFILE"
+flock -w 30 200 || { echo "エラー: ロック取得タイムアウト" >&2; exit 1; }
+
 python3 - "$VAULT" "$END_DATE" <<'PYEOF'
 import re
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+import yaml
 
 VAULT = Path(sys.argv[1]).expanduser()
 end_date_raw = sys.argv[2]
@@ -48,6 +55,9 @@ REPORT_DIR = VAULT / "40_分析" / "週次レポート"
 REPORT_PATH = REPORT_DIR / f"{PERIOD_END.isoformat()}.md"
 
 
+STAGE_VALUES = ("未着手", "学習中", "復習中", "卒業済")
+
+
 def split_frontmatter(content: str):
     if not content.startswith("---\n"):
         return "", content
@@ -58,49 +68,27 @@ def split_frontmatter(content: str):
     return content[4:end], content[end + len(marker) :]
 
 
-def strip_quotes(value: str) -> str:
-    value = value.strip()
-    if len(value) >= 2 and ((value[0] == '"' and value[-1] == '"') or (value[0] == "'" and value[-1] == "'")):
-        return value[1:-1]
-    return value
-
-
-def parse_simple_yaml(text: str):
-    data = {}
-    for raw_line in text.splitlines():
-        line = raw_line.rstrip()
-        if not line or line.lstrip().startswith("#"):
-            continue
-        if line.startswith(" ") or line.startswith("\t"):
-            continue
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key = key.strip()
-        value = value.strip()
-        if value == "":
-            data[key] = None
-            continue
-        value = strip_quotes(value)
-        if re.fullmatch(r"-?\d+", value):
-            data[key] = int(value)
-        else:
-            data[key] = value
-    return data
-
-
 def parse_frontmatter(text: str):
     if not text.strip():
         return {}
     try:
-        import yaml  # type: ignore
-
         parsed = yaml.safe_load(text)
         if isinstance(parsed, dict):
             return parsed
-    except Exception:
+    except yaml.YAMLError:
         pass
-    return parse_simple_yaml(text)
+    return {}
+
+
+def normalize_stage(raw_stage: str, status: str) -> str:
+    """stage を正規化。欠損時は status から推定する。"""
+    if raw_stage in STAGE_VALUES:
+        return raw_stage
+    if status == "卒業":
+        return "卒業済"
+    if status in ("未着手", "学習中", "復習中"):
+        return status
+    return "未着手"
 
 
 def to_int(value) -> int:
@@ -207,9 +195,9 @@ for path in topic_files:
     fm = parse_frontmatter(fm_text)
 
     topic = str(fm.get("topic") or path.stem)
-    stage = str(fm.get("stage") or fm.get("status") or "未着手")
-    if stage not in stage_counts:
-        stage = "未着手"
+    raw_stage = str(fm.get("stage") or "").strip()
+    status = str(fm.get("status") or "").strip()
+    stage = normalize_stage(raw_stage, status)
     stage_counts[stage] += 1
 
     importance = str(fm.get("importance") or "").strip().upper()
