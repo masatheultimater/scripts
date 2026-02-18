@@ -27,6 +27,11 @@ GRADUATION_GAP_DAYS = 25
 GRADUATION_MIN_KOME = 4
 KOME_THRESHOLD_REVIEW = 16  # kome_total >= 16 で stage=復習中
 
+# 間隔反復スケジュール（interval_index → 復習間隔日数）
+# index 0=初回, 1=3日後完了, 2=7日後完了, 3=14日後完了, 4=28日後完了(卒業)
+INTERVAL_DAYS = (3, 7, 14, 28)
+GRADUATION_INTERVAL_INDEX = len(INTERVAL_DAYS)  # == 4
+
 VAULT_DEFAULT = Path(os.environ.get("VAULT", "")).expanduser() or Path.home() / "vault" / "houjinzei"
 TOPIC_DIR_NAME = "10_論点"
 LOCKFILE = "/tmp/houjinzei_vault.lock"
@@ -89,6 +94,29 @@ def normalize_stage(raw_stage: str, status: str) -> str:
     if status in ("未着手", "学習中", "復習中"):
         return status
     return "未着手"
+
+
+# ─── Interval Index ──────────────────────────────────────
+
+def next_review_days(interval_index: int) -> int:
+    """interval_index に対応する次回復習までの日数を返す。
+
+    interval_index が INTERVAL_DAYS の範囲外なら最大間隔を返す。
+    """
+    if interval_index < 0:
+        interval_index = 0
+    if interval_index >= len(INTERVAL_DAYS):
+        return INTERVAL_DAYS[-1]
+    return INTERVAL_DAYS[interval_index]
+
+
+def is_graduation_ready(interval_index: int, kome_total: int) -> bool:
+    """卒業条件を満たしているか判定する。
+
+    interval_index == GRADUATION_INTERVAL_INDEX (4) かつ
+    kome_total >= GRADUATION_MIN_KOME
+    """
+    return interval_index >= GRADUATION_INTERVAL_INDEX and kome_total >= GRADUATION_MIN_KOME
 
 
 # ─── Frontmatter I/O ───────────────────────────────────

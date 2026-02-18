@@ -329,6 +329,7 @@ for topic in topics:
             "kome_total: 0",
             "calc_correct: 0",
             "calc_wrong: 0",
+            "interval_index: 0",
             "last_practiced:",
             "stage: 未着手",
             "status: 未着手",

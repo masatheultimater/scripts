@@ -73,6 +73,9 @@ LIMIT = int(os.environ["LIMIT_ARG"])
 TOPIC_ROOT = VAULT / "10_論点"
 OUTPUT_PATH = VAULT / "50_エクスポート" / "komekome_import.json"
 
+# 間隔反復スケジュール
+INTERVAL_DAYS = (3, 7, 14, 28)
+
 
 def eprint(msg: str) -> None:
     print(msg, file=os.sys.stderr)
@@ -140,6 +143,8 @@ for md in sorted(TOPIC_ROOT.rglob("*.md")):
     rel = md.relative_to(TOPIC_ROOT).as_posix()
     topic_id = rel[:-3] if rel.endswith(".md") else rel
 
+    interval_index = to_int(fm.get("interval_index", 0))
+
     records.append(
         {
             "topic_id": topic_id,
@@ -152,6 +157,7 @@ for md in sorted(TOPIC_ROOT.rglob("*.md")):
             "calc_correct": to_int(fm.get("calc_correct", 0)),
             "calc_wrong": to_int(fm.get("calc_wrong", 0)),
             "kome_total": to_int(fm.get("kome_total", 0)),
+            "interval_index": interval_index,
         }
     )
 
@@ -174,14 +180,37 @@ def add_priority(selected, selected_ids, candidates, reason):
             "reason": reason,
             "calc_correct": r["calc_correct"],
             "calc_wrong": r["calc_wrong"],
+            "intervalIndex": r["interval_index"],
         }
         selected.append(item)
         selected_ids.add(r["topic_id"])
 
 
-def due_days_ago(days: int):
-    target = base_date - timedelta(days=days)
-    return [r for r in records if r["last_practiced"] == target]
+def review_due(days: int):
+    """last_practiced から days 日以上経過した論点を返す。"""
+    cutoff = base_date - timedelta(days=days)
+    return [r for r in records if r["last_practiced"] is not None
+            and r["last_practiced"] <= cutoff]
+
+
+def interval_review_due():
+    """interval_index ベースで復習期日に達した論点を返す。
+
+    interval_index に対応する INTERVAL_DAYS の日数が last_practiced から
+    経過していれば復習対象。interval_index が範囲外（未設定含む）の場合は
+    レガシーロジックに委ねるためスキップ。
+    """
+    due = []
+    for r in records:
+        idx = r["interval_index"]
+        if idx < 0 or idx >= len(INTERVAL_DAYS):
+            continue
+        if r["last_practiced"] is None:
+            continue
+        required_days = INTERVAL_DAYS[idx]
+        if r["last_practiced"] <= base_date - timedelta(days=required_days):
+            due.append(r)
+    return due
 
 
 selected = []
@@ -193,10 +222,19 @@ add_priority(
     [r for r in records if r["stage"] == "未着手" and r["importance"] == "A"],
     "新規A論点",
 )
-add_priority(selected, selected_ids, due_days_ago(3), "3日後復習")
-add_priority(selected, selected_ids, due_days_ago(7), "7日後復習")
-add_priority(selected, selected_ids, due_days_ago(14), "14日後復習")
-add_priority(selected, selected_ids, due_days_ago(28), "28日後復習")
+
+# interval_index ベース復習（優先）
+interval_due = interval_review_due()
+if interval_due:
+    interval_due.sort(key=lambda r: r["interval_index"], reverse=True)
+    add_priority(selected, selected_ids, interval_due, "間隔復習")
+
+# レガシー復習（interval_index 未設定のノート向け、>= で取りこぼし防止）
+add_priority(selected, selected_ids, review_due(3), "3日後復習")
+add_priority(selected, selected_ids, review_due(7), "7日後復習")
+add_priority(selected, selected_ids, review_due(14), "14日後復習")
+add_priority(selected, selected_ids, review_due(28), "28日後復習")
+
 add_priority(
     selected,
     selected_ids,
@@ -217,6 +255,7 @@ add_priority(
 OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 payload = {
+    "generated_date": base_date.strftime("%Y-%m-%d"),
     "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     "total": len(selected),
     "questions": selected,

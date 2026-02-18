@@ -131,6 +131,14 @@ def validate_input(data):
             if m.strip():
                 cleaned_mistakes.append(m.strip())
 
+        # intervalIndex は任意フィールド（コメコメアプリ側が送信）
+        interval_index = item.get("intervalIndex")
+        if interval_index is not None:
+            try:
+                interval_index = int(interval_index)
+            except (ValueError, TypeError):
+                interval_index = None
+
         validated.append(
             {
                 "topic_id": topic_id.strip(),
@@ -138,6 +146,7 @@ def validate_input(data):
                 "correct": correct,
                 "time_seconds": int(time_seconds),
                 "mistakes": cleaned_mistakes,
+                "interval_index": interval_index,
             }
         )
 
@@ -251,6 +260,20 @@ def update_topic_note(path: Path, topic_result, session_date: str):
     KOME_THRESHOLD = 16
     GRAD_GAP_DAYS = 25
     GRAD_MIN_KOME = 4
+    INTERVAL_DAYS = (3, 7, 14, 28)
+    GRADUATION_INTERVAL_INDEX = len(INTERVAL_DAYS)  # == 4
+
+    # --- interval_index の読み取り ---
+    current_interval = data.get("interval_index")
+    try:
+        current_interval = int(current_interval) if current_interval not in (None, "") else 0
+    except (ValueError, TypeError):
+        current_interval = 0
+
+    # コメコメ側から送信された intervalIndex があれば採用
+    incoming_interval = topic_result.get("interval_index")
+    if incoming_interval is not None:
+        current_interval = incoming_interval
 
     # --- stage / status 更新 ---
     current_status = data.get("status", "未着手")
@@ -277,8 +300,17 @@ def update_topic_note(path: Path, topic_result, session_date: str):
         elif current_status == "学習中" and new_kome >= KOME_THRESHOLD:
             data["status"] = "復習中"
 
-        # 卒業判定
-        if old_last_practiced and current_status == "復習中":
+        # interval_index をインクリメント（正解時）
+        if current_status in ("復習中", "学習中"):
+            current_interval = min(current_interval + 1, GRADUATION_INTERVAL_INDEX)
+
+        # 卒業判定: interval_index ベース（優先）
+        graduated = False
+        if current_interval >= GRADUATION_INTERVAL_INDEX and new_kome >= GRAD_MIN_KOME:
+            graduated = True
+
+        # レガシーフォールバック: gap ベース（interval_index 未設定ノート向け）
+        if not graduated and old_last_practiced and current_status == "復習中":
             try:
                 from datetime import date as _date
                 if isinstance(old_last_practiced, (_date, datetime)):
@@ -288,15 +320,21 @@ def update_topic_note(path: Path, topic_result, session_date: str):
                 new_d = datetime.strptime(session_date, "%Y-%m-%d").date()
                 gap = (new_d - old_d).days
                 if gap >= GRAD_GAP_DAYS and new_kome >= GRAD_MIN_KOME:
-                    data["status"] = "卒業"
-                    data["stage"] = "卒業済"
+                    graduated = True
             except ValueError:
                 pass
+
+        if graduated:
+            data["status"] = "卒業"
+            data["stage"] = "卒業済"
     else:
-        # 不正解時: ステータス補正
+        # 不正解時: ステータス補正、interval_index リセット
         if current_status == "未着手":
             data["status"] = "学習中"
             data["stage"] = "学習中"
+        current_interval = 0
+
+    data["interval_index"] = current_interval
 
     if not topic_result["correct"] and topic_result["mistakes"]:
         current_mistakes = data.get("mistakes", [])

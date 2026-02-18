@@ -112,15 +112,22 @@ def parse_type_array(raw_value: str):
 
 
 def has_substantive_content(body: str) -> bool:
+    in_overview = False
+    substantive_count = 0
     for line in body.splitlines():
         s = line.strip()
         if not s:
             continue
-        if s.startswith("#"):
+        if re.match(r"^#{1,6}\s+", s):
+            in_overview = bool(re.match(r"^#{1,6}\s+概要", s))
             continue
         if re.fullmatch(r"[-*_]{3,}", s):
             continue
-        return True
+        if in_overview:
+            continue
+        substantive_count += 1
+        if substantive_count >= 2:
+            return True
     return False
 
 
