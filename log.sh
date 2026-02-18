@@ -153,6 +153,11 @@ PY
 )"
 fi
 
+# ファイルロック（並行実行対策）
+LOCKFILE="/tmp/houjinzei_vault.lock"
+exec 200>"$LOCKFILE"
+flock -n 200 || { echo "エラー: 別のスクリプトが実行中です" >&2; exit 1; }
+
 TODAY="$(date +%F)"
 NOW="$(date +%H:%M)"
 LOG_FILE="$LOG_ROOT/${TODAY}.md"
@@ -235,14 +240,24 @@ if result == "×" and memo.strip():
     mistakes.append(memo.strip())
     fm_data["mistakes"] = mistakes
 
+# --- stage / status 更新（卒業保護付き） ---
+current_status = fm_data.get("status", "未着手")
 attempts = calc_correct + calc_wrong
-if attempts == 0:
-    stage = "未着手"
-elif attempts <= 3:
-    stage = "学習中"
+
+if current_status == "卒業":
+    # 卒業済みノートは stage/status を巻き戻さない
+    stage = fm_data.get("stage", "卒業済")
 else:
-    stage = "復習中"
-fm_data["stage"] = stage
+    if attempts == 0:
+        stage = "未着手"
+    elif attempts <= 3:
+        stage = "学習中"
+    else:
+        stage = "復習中"
+    fm_data["stage"] = stage
+    # status 更新（未着手→学習中への遷移のみ）
+    if current_status == "未着手" and attempts > 0:
+        fm_data["status"] = "学習中"
 
 topic = fm_data.get("topic")
 if not isinstance(topic, str) or not topic.strip():
@@ -253,6 +268,7 @@ dumped = yaml.safe_dump(
     allow_unicode=True,
     sort_keys=False,
     default_flow_style=False,
+    width=10000,
 ).rstrip()
 
 new_text = f"---\n{dumped}\n---\n{body}"

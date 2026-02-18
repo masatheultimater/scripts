@@ -41,10 +41,18 @@ fi
 VAULT="${VAULT:-$HOME/vault/houjinzei}"
 export VAULT TYPE_FILTER
 
+LOCKFILE="/tmp/houjinzei_vault.lock"
+exec 200>"$LOCKFILE"
+flock -n 200 || { echo "エラー: 別のスクリプトが実行中です" >&2; exit 1; }
+
 python3 - <<'PY'
 import json
 import os
 import re
+import hashlib
+import shutil
+import subprocess
+import yaml
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -54,40 +62,32 @@ TYPE_FILTER = os.environ["TYPE_FILTER"]
 TOPIC_DIR = VAULT / "10_論点"
 OUTPUT_DIR = VAULT / "50_エクスポート"
 TARGET_TYPES = ["理論", "計算"] if TYPE_FILTER == "all" else [TYPE_FILTER]
+HASH_FILE = OUTPUT_DIR / ".notebooklm_hash"
+CHAR_LIMIT = 500_000
+PLACEHOLDER_PATTERNS = [
+    r"[-*]\s*（.*?記入.*?）",
+    r"[-*]\s*（.*?未記入.*?）",
+    r"[-*]\s*TODO\b",
+    r"[-*]\s*TBD\b",
+]
 
 
 def eprint(msg: str) -> None:
     print(msg, file=os.sys.stderr)
 
 
-def read_frontmatter_and_body(md_text: str):
-    lines = md_text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}, md_text
-
-    end_idx = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            end_idx = i
-            break
-
-    if end_idx is None:
-        return {}, md_text
-
-    fm_lines = lines[1:end_idx]
-    body = "\n".join(lines[end_idx + 1 :]).strip()
-
-    fm = {}
-    for line in fm_lines:
-        m = re.match(r"^([A-Za-z0-9_\-]+)\s*:\s*(.*)$", line.strip())
-        if not m:
-            continue
-        key = m.group(1)
-        value = m.group(2).strip()
-        if len(value) >= 2 and ((value[0] == '"' and value[-1] == '"') or (value[0] == "'" and value[-1] == "'")):
-            value = value[1:-1].strip()
-        fm[key] = value
-
+def read_note(md_path: Path):
+    text = md_path.read_text(encoding="utf-8", errors="ignore")
+    if not text.startswith("---\n"):
+        return None, text
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return None, text
+    try:
+        fm = yaml.safe_load(text[4:end]) or {}
+    except yaml.YAMLError:
+        return None, text
+    body = text[end + 5 :]
     return fm, body
 
 
@@ -124,46 +124,46 @@ def has_substantive_content(body: str) -> bool:
     return False
 
 
-if not TOPIC_DIR.exists():
-    eprint(f"エラー: 論点ディレクトリが見つかりません: {TOPIC_DIR}")
-    raise SystemExit(1)
-
-all_topics = []
-for md_path in sorted(TOPIC_DIR.rglob("*.md")):
-    text = md_path.read_text(encoding="utf-8", errors="ignore")
-    fm, body = read_frontmatter_and_body(text)
-
-    type_values = parse_type_array(fm.get("type", ""))
-    if not type_values:
-        continue
-
-    category = fm.get("category", "").strip() or "未分類"
-    topic_name = fm.get("topic", "").strip() or md_path.stem
-
-    all_topics.append(
-        {
-            "path": md_path,
-            "types": type_values,
-            "category": category,
-            "topic": topic_name,
-            "body": body,
-        }
+def remove_placeholders(body: str) -> str:
+    lines = body.splitlines()
+    return "\n".join(
+        l
+        for l in lines
+        if not any(re.fullmatch(p, l.strip()) for p in PLACEHOLDER_PATTERNS)
     )
 
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-summary = {}
 
-for t in TARGET_TYPES:
-    out_path = OUTPUT_DIR / f"notebooklm_{t}.md"
-    matched = [x for x in all_topics if t in x["types"]]
-    matched.sort(key=lambda x: (x["category"], x["topic"]))
+def normalize_headings(body: str) -> str:
+    lines = body.splitlines()
+    result = []
+    for line in lines:
+        m = re.match(r"^(#{1,3})\s+(.+)$", line)
+        if m:
+            level = len(m.group(1))
+            result.append(f"{'#' * (level + 3)} {m.group(2)}")
+        else:
+            result.append(line)
+    return "\n".join(result)
 
-    filtered = [x for x in matched if has_substantive_content(x["body"])]
-    grouped = defaultdict(list)
-    for item in filtered:
-        grouped[item["category"]].append(item)
 
+def sha256_text(text: str) -> str:
+    canonical = re.sub(r"^生成日時: .*$", "生成日時: <stable>", text, flags=re.MULTILINE)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def load_hashes(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items()}
+
+
+def render_chunk(t: str, now_str: str, categories: list) -> str:
     lines = []
     lines.append(f"# 法人税法 {t} まとめ")
     lines.append("")
@@ -172,11 +172,13 @@ for t in TARGET_TYPES:
     lines.append("## 目次")
     lines.append("")
 
-    if filtered:
-        for category in sorted(grouped.keys()):
+    total = 0
+    if categories:
+        for category, items in categories:
             lines.append(f"- {category}")
-            for item in grouped[category]:
+            for item in items:
                 lines.append(f"  - {item['topic']}")
+                total += 1
     else:
         lines.append("- 対象トピックはありません")
 
@@ -184,32 +186,160 @@ for t in TARGET_TYPES:
     lines.append("## 本文")
     lines.append("")
 
-    if filtered:
-        current_category = None
-        for item in filtered:
-            if item["category"] != current_category:
-                current_category = item["category"]
-                lines.append(f"## {current_category}")
+    if categories:
+        for category, items in categories:
+            lines.append(f"## {category}")
+            lines.append("")
+            for item in items:
+                lines.append(f"### {item['topic']}")
                 lines.append("")
-
-            lines.append(f"### {item['topic']}")
-            lines.append("")
-            lines.append(item["body"].rstrip())
-            lines.append("")
-            lines.append("---")
-            lines.append("")
+                lines.append(item["body"].rstrip())
+                lines.append("")
+                lines.append("---")
+                lines.append("")
     else:
         lines.append("対象トピックはありません。")
         lines.append("")
 
-    lines.append(f"総トピック数: {len(filtered)}")
+    lines.append(f"総トピック数: {total}")
     lines.append("")
+    return "\n".join(lines)
 
-    out_path.write_text("\n".join(lines), encoding="utf-8")
-    summary[t] = {"count": len(filtered), "path": out_path}
+
+def chunk_categories(t: str, now_str: str, categories: list) -> list:
+    if not categories:
+        return [render_chunk(t, now_str, [])]
+
+    chunks = []
+    current = []
+    for cat in categories:
+        if not current:
+            current = [cat]
+            continue
+        candidate = render_chunk(t, now_str, current + [cat])
+        if len(candidate) <= CHAR_LIMIT:
+            current.append(cat)
+        else:
+            chunks.append(current)
+            current = [cat]
+
+    if current:
+        chunks.append(current)
+
+    rendered = []
+    for c in chunks:
+        txt = render_chunk(t, now_str, c)
+        if len(txt) > CHAR_LIMIT:
+            eprint(f"警告: 1チャンクが文字数上限を超えています: type={t}, {len(txt)}文字")
+        rendered.append(txt)
+    return rendered
+
+
+def output_paths_for_type(t: str, chunk_count: int) -> list:
+    if chunk_count <= 1:
+        return [OUTPUT_DIR / f"notebooklm_{t}.md"]
+    return [OUTPUT_DIR / f"notebooklm_{t}_{i}.md" for i in range(1, chunk_count + 1)]
+
+
+if not TOPIC_DIR.exists():
+    eprint(f"エラー: 論点ディレクトリが見つかりません: {TOPIC_DIR}")
+    raise SystemExit(1)
+
+all_topics = []
+for md_path in sorted(TOPIC_DIR.rglob("*.md")):
+    fm, body = read_note(md_path)
+
+    importance = fm.get("importance", "") if isinstance(fm, dict) else ""
+    if isinstance(importance, str):
+        importance = importance.strip().upper()
+    if importance not in ("A", "B"):
+        continue
+
+    raw_type = fm.get("type", []) if isinstance(fm, dict) else []
+    if isinstance(raw_type, list):
+        type_values = [str(x).strip() for x in raw_type if str(x).strip()]
+    elif isinstance(raw_type, str):
+        type_values = parse_type_array(raw_type)
+    else:
+        type_values = []
+    if not type_values:
+        continue
+
+    cleaned_body = normalize_headings(remove_placeholders(body)).strip()
+    if not has_substantive_content(cleaned_body):
+        continue
+
+    category = fm.get("category", "").strip() if isinstance(fm, dict) else ""
+    category = category or "未分類"
+    topic_name = fm.get("topic", "").strip() if isinstance(fm, dict) else ""
+    topic_name = topic_name or md_path.stem
+
+    all_topics.append(
+        {
+            "path": md_path,
+            "types": type_values,
+            "category": category,
+            "topic": topic_name,
+            "body": cleaned_body,
+        }
+    )
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+summary = {}
+changed_types = []
+prev_hashes = load_hashes(HASH_FILE)
+new_hashes = dict(prev_hashes)
+
+for t in TARGET_TYPES:
+    matched = [x for x in all_topics if t in x["types"]]
+    matched.sort(key=lambda x: (x["category"], x["topic"]))
+    grouped = defaultdict(list)
+    for item in matched:
+        grouped[item["category"]].append(item)
+
+    categories = [(cat, grouped[cat]) for cat in sorted(grouped.keys())]
+    chunk_texts = chunk_categories(t, now_str, categories)
+    target_paths = output_paths_for_type(t, len(chunk_texts))
+
+    type_changed = False
+    for out_path, content in zip(target_paths, chunk_texts):
+        key = str(out_path)
+        digest = sha256_text(content)
+        if prev_hashes.get(key) == digest and out_path.exists():
+            new_hashes[key] = digest
+            continue
+        out_path.write_text(content, encoding="utf-8")
+        new_hashes[key] = digest
+        type_changed = True
+
+    old_files = sorted(OUTPUT_DIR.glob(f"notebooklm_{t}*.md"))
+    target_set = {str(p) for p in target_paths}
+    for old_file in old_files:
+        if str(old_file) in target_set:
+            continue
+        old_file.unlink(missing_ok=True)
+        new_hashes.pop(str(old_file), None)
+        type_changed = True
+
+    if type_changed:
+        changed_types.append(t)
+
+    summary[t] = {
+        "count": len(matched),
+        "paths": [str(p) for p in target_paths],
+    }
+
+HASH_FILE.write_text(
+    json.dumps(new_hashes, ensure_ascii=False, indent=2, sort_keys=True),
+    encoding="utf-8",
+)
 
 print("NotebookLMエクスポートが完了しました。")
 for t in ["理論", "計算"]:
     if t in summary:
-        print(f"- {t}: {summary[t]['count']}件 -> {summary[t]['path']}")
+        print(f"- {t}: {summary[t]['count']}件 -> {', '.join(summary[t]['paths'])}")
+
+if changed_types and shutil.which("wslview"):
+    subprocess.run(["wslview", "https://notebooklm.google.com/"], check=False)
 PY

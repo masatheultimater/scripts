@@ -21,6 +21,11 @@ if [ ! -f "$RESULTS_JSON" ]; then
   exit 1
 fi
 
+# ファイルロック（並行実行対策）
+LOCKFILE="/tmp/houjinzei_vault.lock"
+exec 200>"$LOCKFILE"
+flock -n 200 || { echo "エラー: 別のスクリプトが実行中です" >&2; exit 1; }
+
 python3 - "$RESULTS_JSON" "$VAULT" <<'PYEOF'
 import json
 import re
@@ -228,10 +233,42 @@ def update_topic_note(path: Path, topic_result, session_date: str):
 
     new_kome = current_kome + topic_result["kome_count"]
     data["kome_total"] = new_kome
+
+    # last_practiced の旧値を保存（卒業判定の gap 計算用）
+    old_last_practiced = data.get("last_practiced", "")
     data["last_practiced"] = session_date
+
+    # --- stage / status 更新 ---
+    current_status = data.get("status", "未着手")
 
     if topic_result["correct"]:
         data["stage"] = "復習中" if new_kome >= 16 else "学習中"
+
+        # status 遷移
+        if current_status == "未着手":
+            data["status"] = "学習中"
+        elif current_status == "学習中" and new_kome >= 16:
+            data["status"] = "復習中"
+
+        # 卒業判定（暫定: interval_index なし）
+        if old_last_practiced and current_status == "復習中":
+            try:
+                old_dt = datetime.strptime(str(old_last_practiced), "%Y-%m-%d")
+                new_dt = datetime.strptime(session_date, "%Y-%m-%d")
+                gap = (new_dt - old_dt).days
+                if gap >= 25 and new_kome >= 4:
+                    data["status"] = "卒業"
+                    data["stage"] = "卒業済"
+            except ValueError:
+                pass
+    else:
+        # 不正解時: 卒業取消・ステータス補正
+        if current_status == "卒業":
+            data["status"] = "復習中"
+            data["stage"] = "復習中"
+        elif current_status == "未着手":
+            data["status"] = "学習中"
+            data["stage"] = "学習中"
 
     if not topic_result["correct"] and topic_result["mistakes"]:
         current_mistakes = data.get("mistakes", [])

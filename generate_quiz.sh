@@ -132,6 +132,7 @@ for md in sorted(TOPIC_ROOT.rglob("*.md")):
     importance = fm.get("importance", "").strip()
     stage = fm.get("stage", "").strip()
     last_practiced_raw = fm.get("last_practiced", "").strip()
+    status = fm.get("status", "").strip()
 
     last_practiced = None
     if last_practiced_raw:
@@ -150,12 +151,17 @@ for md in sorted(TOPIC_ROOT.rglob("*.md")):
             "category": category,
             "importance": importance,
             "stage": stage,
+            "status": status,
             "last_practiced": last_practiced,
             "calc_correct": to_int(fm.get("calc_correct", 0)),
             "calc_wrong": to_int(fm.get("calc_wrong", 0)),
             "kome_total": to_int(fm.get("kome_total", 0)),
         }
     )
+
+
+# 卒業済み論点を出題候補から除外
+records = [r for r in records if r["status"] != "卒業"]
 
 
 def add_priority(selected, selected_ids, candidates, reason):
