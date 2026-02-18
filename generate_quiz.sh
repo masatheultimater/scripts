@@ -49,7 +49,7 @@ if ! [[ "$LIMIT_ARG" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-VAULT="${HOME}/vault/houjinzei"
+VAULT="${VAULT:-$HOME/vault/houjinzei}"
 export VAULT DATE_ARG LIMIT_ARG
 
 # ファイルロック（並行実行対策）

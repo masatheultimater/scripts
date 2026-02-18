@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-VAULT="${HOME}/vault/houjinzei"
+VAULT="${VAULT:-$HOME/vault/houjinzei}"
 export VAULT DATE_ARG
 
 # ファイルロック（並行実行対策）

@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-VAULT="$HOME/vault/houjinzei"
+VAULT="${VAULT:-$HOME/vault/houjinzei}"
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 INDEX_FILE="$VAULT/01_sources/_index.json"
 EXTRACTED_DIR="$VAULT/02_extracted"
@@ -75,38 +75,44 @@ timeout 300 gemini -p "$(printf '以下のPDFファイルを読み込んで分�
 
 # Geminiの出力からMarkdownとJSONを分離
 # JSON部分を抽出（```json ... ``` ブロック）
-python3 << PYEOF
+export GEMINI_RAW TOPICS_FILE STRUCTURE_FILE
+python3 - <<'PYEOF'
+import os
 import re, json, sys
 
-with open("$GEMINI_RAW", "r", encoding="utf-8") as f:
+gemini_raw = os.environ["GEMINI_RAW"]
+topics_file = os.environ["TOPICS_FILE"]
+structure_file = os.environ["STRUCTURE_FILE"]
+
+with open(gemini_raw, "r", encoding="utf-8") as f:
     raw = f.read()
 
 # JSONブロックを抽出
-json_match = re.search(r'\`\`\`json\s*\n(.*?)\n\`\`\`', raw, re.DOTALL)
+json_match = re.search(r'```json\s*\n(.*?)\n```', raw, re.DOTALL)
 if json_match:
     json_str = json_match.group(1)
     # JSONとして有効か検証
     try:
         data = json.loads(json_str)
-        with open("$TOPICS_FILE", "w", encoding="utf-8") as f:
+        with open(topics_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print("✅ topics.json 抽出成功")
+        print("topics.json 抽出成功")
     except json.JSONDecodeError as e:
-        print(f"⚠️  JSONパースエラー: {e}")
-        print("   手動で修正してください: $GEMINI_RAW")
-        with open("$TOPICS_FILE", "w", encoding="utf-8") as f:
+        print(f"JSONパースエラー: {e}", file=sys.stderr)
+        print(f"   手動で修正してください: {gemini_raw}", file=sys.stderr)
+        with open(topics_file, "w", encoding="utf-8") as f:
             f.write(json_str)
         sys.exit(1)
 else:
-    print("⚠️  JSONブロックが見つかりませんでした")
-    print("   Geminiの出力を確認: $GEMINI_RAW")
+    print("JSONブロックが見つかりませんでした", file=sys.stderr)
+    print(f"   Geminiの出力を確認: {gemini_raw}", file=sys.stderr)
     sys.exit(1)
 
 # Markdown部分（JSONブロック以外）を structure.md として保存
-md_content = re.sub(r'\`\`\`json\s*\n.*?\n\`\`\`', '', raw, flags=re.DOTALL).strip()
-with open("$STRUCTURE_FILE", "w", encoding="utf-8") as f:
+md_content = re.sub(r'```json\s*\n.*?\n```', '', raw, flags=re.DOTALL).strip()
+with open(structure_file, "w", encoding="utf-8") as f:
     f.write(md_content)
-print("✅ structure.md 抽出成功")
+print("structure.md 抽出成功")
 PYEOF
 
 if [ $? -ne 0 ]; then
@@ -140,22 +146,29 @@ fi
 # ==========================================
 # 取り込み済みに記録
 # ==========================================
-python3 << PYEOF
+export INDEX_FILE PDF_FILENAME SOURCE_TYPE SAFE_NAME
+python3 - <<'PYEOF'
 import json
+import os
 from datetime import datetime
 
-with open("$INDEX_FILE", "r", encoding="utf-8") as f:
+index_file = os.environ["INDEX_FILE"]
+pdf_filename = os.environ["PDF_FILENAME"]
+source_type = os.environ["SOURCE_TYPE"]
+safe_name = os.environ["SAFE_NAME"]
+
+with open(index_file, "r", encoding="utf-8") as f:
     index = json.load(f)
 
 index["processed"].append({
-    "filename": "$PDF_FILENAME",
-    "source_type": "$SOURCE_TYPE",
+    "filename": pdf_filename,
+    "source_type": source_type,
     "processed_at": datetime.now().isoformat(),
-    "structure_file": "${SAFE_NAME}_structure.md",
-    "topics_file": "${SAFE_NAME}_topics.json"
+    "structure_file": f"{safe_name}_structure.md",
+    "topics_file": f"{safe_name}_topics.json"
 })
 
-with open("$INDEX_FILE", "w", encoding="utf-8") as f:
+with open(index_file, "w", encoding="utf-8") as f:
     json.dump(index, f, ensure_ascii=False, indent=2)
 PYEOF
 

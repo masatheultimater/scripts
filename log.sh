@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-VAULT="$HOME/vault/houjinzei"
+VAULT="${VAULT:-$HOME/vault/houjinzei}"
 TOPIC_ROOT="$VAULT/10_論点"
 LOG_ROOT="$VAULT/20_演習ログ/計算演習"
 

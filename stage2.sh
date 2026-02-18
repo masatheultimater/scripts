@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-VAULT="$HOME/vault/houjinzei"
+VAULT="${VAULT:-$HOME/vault/houjinzei}"
 LOG_DIR="$VAULT/logs"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/stage2_${RUN_TS}.log"
@@ -91,14 +91,15 @@ $SOURCE_TYPE
 fi
 
 if [ "$DRY_RUN" = true ]; then
-  echo "🔎 DRY RUN: claude -p は実行しません"
-  python3 << PYEOF
+  echo "DRY RUN: claude -p は実行しません"
+  export TOPICS_FILE VAULT
+  python3 - <<'PYEOF'
 import json
 import os
 import sys
 
-topics_file = "$TOPICS_FILE"
-vault = "$VAULT"
+topics_file = os.environ["TOPICS_FILE"]
+vault = os.environ["VAULT"]
 
 with open(topics_file, "r", encoding="utf-8") as f:
     data = json.load(f)
@@ -158,16 +159,17 @@ PYEOF
   exit 0
 fi
 
-python3 << PYEOF
+export TOPICS_FILE VAULT SOURCE_TYPE_PROMPT
+python3 - <<'PYEOF'
 import datetime
 import json
 import os
 import re
 import sys
 
-topics_file = "$TOPICS_FILE"
-vault = "$VAULT"
-source_type_prompt = """$SOURCE_TYPE_PROMPT"""
+topics_file = os.environ["TOPICS_FILE"]
+vault = os.environ["VAULT"]
+source_type_prompt = os.environ.get("SOURCE_TYPE_PROMPT", "")
 
 def ensure_list(value):
     if isinstance(value, list):

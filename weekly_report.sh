@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-VAULT="$HOME/vault/houjinzei"
+VAULT="${VAULT:-$HOME/vault/houjinzei}"
 
 usage() {
   echo "使い方: bash weekly_report.sh [--date YYYY-MM-DD]"

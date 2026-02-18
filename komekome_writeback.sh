@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-VAULT="$HOME/vault/houjinzei"
+VAULT="${VAULT:-$HOME/vault/houjinzei}"
 
 if [ $# -ne 1 ]; then
   echo "使い方: bash komekome_writeback.sh <results_json_path>"
