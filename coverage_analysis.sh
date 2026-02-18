@@ -143,6 +143,8 @@ orphan_topics = []
 unstarted_a_topics = []
 
 for md in sorted(TOPIC_ROOT.rglob("*.md")):
+    if md.name in ("README.md", "CLAUDE.md"):
+        continue
     fm = parse_frontmatter(md)
     if not fm:
         continue
@@ -159,7 +161,7 @@ for md in sorted(TOPIC_ROOT.rglob("*.md")):
     stage = normalize_stage(raw_stage, status)
     importance = str(fm.get("importance", "") or "").strip()
     kome_total = as_int(fm.get("kome_total", 0))
-    sources_raw = str(fm.get("sources", "") or "").strip()
+    sources_val = fm.get("sources")
 
     stat = cat_stats[category]
     stat["total"] += 1
@@ -190,7 +192,7 @@ for md in sorted(TOPIC_ROOT.rglob("*.md")):
     if importance == "A" and stage == "未着手":
         unstarted_a_topics.append({"category": category, "topic": topic_name, "path": rel})
 
-    has_source = bool(sources_raw)
+    has_source = isinstance(sources_val, list) and len(sources_val) > 0 or (isinstance(sources_val, str) and sources_val.strip())
     if not has_source:
         orphan_topics.append({"category": category, "topic": topic_name, "path": rel})
 

@@ -77,7 +77,7 @@ def eprint(msg: str) -> None:
 
 
 def read_note(md_path: Path):
-    text = md_path.read_text(encoding="utf-8", errors="ignore")
+    text = md_path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
         return None, text
     end = text.find("\n---\n", 4)
@@ -247,6 +247,8 @@ if not TOPIC_DIR.exists():
 
 all_topics = []
 for md_path in sorted(TOPIC_DIR.rglob("*.md")):
+    if md_path.name in ("README.md", "CLAUDE.md"):
+        continue
     fm, body = read_note(md_path)
 
     importance = fm.get("importance", "") if isinstance(fm, dict) else ""
@@ -269,9 +271,9 @@ for md_path in sorted(TOPIC_DIR.rglob("*.md")):
     if not has_substantive_content(cleaned_body):
         continue
 
-    category = fm.get("category", "").strip() if isinstance(fm, dict) else ""
+    category = str(fm.get("category", "") or "").strip() if isinstance(fm, dict) else ""
     category = category or "未分類"
-    topic_name = fm.get("topic", "").strip() if isinstance(fm, dict) else ""
+    topic_name = str(fm.get("topic", "") or "").strip() if isinstance(fm, dict) else ""
     topic_name = topic_name or md_path.stem
 
     all_topics.append(

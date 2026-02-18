@@ -114,6 +114,8 @@ base_date = date.today() if not DATE_ARG else parse_date(DATE_ARG)
 
 records = []
 for md in sorted(TOPIC_ROOT.rglob("*.md")):
+    if md.name in ("README.md", "CLAUDE.md"):
+        continue
     fm = parse_frontmatter(md)
     if not fm:
         continue

@@ -117,7 +117,7 @@ def detect_wsl_host():
 
 
 def read_note(md_path):
-    text = md_path.read_text(encoding="utf-8", errors="ignore")
+    text = md_path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
         return None, text
     end = text.find("\n---\n", 4)
@@ -213,6 +213,8 @@ def main():
 
     graduated = []
     for md_path in sorted(topic_dir.rglob("*.md")):
+        if md_path.name in ("README.md", "CLAUDE.md"):
+            continue
         fm, body = read_note(md_path)
         if not isinstance(fm, dict):
             continue
@@ -284,9 +286,7 @@ def main():
         conditions = to_str(fm.get("conditions"))
         kome_total = fm.get("kome_total")
         calc_correct = fm.get("calc_correct")
-        calc_total = fm.get("calc_total")
-        theory_correct = fm.get("theory_correct")
-        theory_total = fm.get("theory_total")
+        calc_wrong = fm.get("calc_wrong")
 
         front_parts = [
             f"<b>論点</b>: {to_html_block(item['topic'])}",
@@ -302,9 +302,7 @@ def main():
             "<b>学習履歴</b>",
             f"kome_total: {to_html_block(to_str(kome_total) or '0')}",
             f"calc_correct: {to_html_block(to_str(calc_correct) or '0')}",
-            f"calc_total: {to_html_block(to_str(calc_total) or '0')}",
-            f"theory_correct: {to_html_block(to_str(theory_correct) or '0')}",
-            f"theory_total: {to_html_block(to_str(theory_total) or '0')}",
+            f"calc_wrong: {to_html_block(to_str(calc_wrong) or '0')}",
         ]
 
         notes.append(

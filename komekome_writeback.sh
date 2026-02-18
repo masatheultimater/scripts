@@ -280,9 +280,13 @@ def update_topic_note(path: Path, topic_result, session_date: str):
         # 卒業判定
         if old_last_practiced and current_status == "復習中":
             try:
-                old_dt = datetime.strptime(str(old_last_practiced), "%Y-%m-%d")
-                new_dt = datetime.strptime(session_date, "%Y-%m-%d")
-                gap = (new_dt - old_dt).days
+                from datetime import date as _date
+                if isinstance(old_last_practiced, (_date, datetime)):
+                    old_d = old_last_practiced if isinstance(old_last_practiced, _date) else old_last_practiced.date()
+                else:
+                    old_d = datetime.strptime(str(old_last_practiced), "%Y-%m-%d").date()
+                new_d = datetime.strptime(session_date, "%Y-%m-%d").date()
+                gap = (new_d - old_d).days
                 if gap >= GRAD_GAP_DAYS and new_kome >= GRAD_MIN_KOME:
                     data["status"] = "卒業"
                     data["stage"] = "卒業済"
