@@ -16,6 +16,74 @@ log() {
   echo "[$(date '+%H:%M:%S')] $*" | tee -a "$CATCHUP_LOG"
 }
 
+# --- 0. 未取り込みPDFの自動検知・処理 ---
+INDEX_FILE="$VAULT/01_sources/_index.json"
+PENDING_PDFS="$(export VAULT INDEX_FILE; python3 - <<'PYEOF' || true
+import json, os
+
+vault = os.environ["VAULT"]
+index_file = os.environ["INDEX_FILE"]
+
+# 処理済みファイル名を取得
+processed = set()
+if os.path.isfile(index_file):
+    with open(index_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    for entry in data.get("processed", []):
+        processed.add(entry.get("filename", ""))
+
+# source_type 推定
+def infer_source_type(filename):
+    fn = filename.lower()
+    if "計算テキスト" in filename or "計算テキスト" in fn:
+        return "計算テキスト"
+    if "計算問題集" in filename:
+        return "計算問題集"
+    if "理論テキスト" in filename or "理論問題集" in filename:
+        return "理論テキスト"
+    if "確認テスト" in filename:
+        return "確認テスト"
+    if "模試" in filename:
+        return "模試"
+    if any(k in filename for k in ("法人税法", "施行令", "施行規則", "通達", "措置法")):
+        return "法令"
+    return ""
+
+# 01_sources/ 配下の全PDFをスキャン
+sources_dir = os.path.join(vault, "01_sources")
+for root, dirs, files in os.walk(sources_dir):
+    for f in sorted(files):
+        if not f.lower().endswith(".pdf"):
+            continue
+        basename = os.path.splitext(f)[0]
+        if basename in processed:
+            continue
+        pdf_path = os.path.join(root, f)
+        source_type = infer_source_type(basename)
+        if source_type:
+            print(f"{pdf_path}\t{source_type}")
+        else:
+            print(f"⚠️  source_type 推定不可: {f}", file=__import__("sys").stderr)
+PYEOF
+)" || true
+
+if [[ -n "$PENDING_PDFS" ]]; then
+  while IFS=$'\t' read -r pdf_path source_type; do
+    if [[ -z "$source_type" || "$source_type" == "?" ]]; then
+      log "⚠️  source_type 推定不可: $(basename "$pdf_path") → 手動で ingest.sh を実行してください"
+      continue
+    fi
+    log "📄 未取り込みPDF検知: $(basename "$pdf_path") (${source_type})"
+    if bash "$SCRIPTS_DIR/ingest.sh" "$pdf_path" "$source_type" 2>&1 | tee -a "$CATCHUP_LOG"; then
+      log "✅ 取り込み完了: $(basename "$pdf_path")"
+    else
+      log "❌ 取り込み失敗: $(basename "$pdf_path") → ログを確認してください"
+    fi
+  done <<< "$PENDING_PDFS"
+else
+  log "未取り込みPDFなし"
+fi
+
 # --- 1. 今日の出題リスト（generate_quiz.sh） ---
 TODAY="$(date +%Y-%m-%d)"
 QUIZ_FILE="$VAULT/50_エクスポート/komekome_import.json"

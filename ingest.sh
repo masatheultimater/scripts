@@ -70,8 +70,38 @@ GEMINI_RAW="$EXTRACTED_DIR/${SAFE_NAME}_gemini_raw.md"
 
 PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
-# Gemini CLI 実行
-timeout 300 gemini -p "$(printf '以下のPDFファイルを読み込んで分析してください: %s\n\n%s' "$PDF_PATH" "$PROMPT_CONTENT")" --include-directories "$(dirname "$PDF_PATH")" --yolo -o text > "$GEMINI_RAW" 2>&1
+# --- STAGE 1a: pypdfでテキスト事前抽出（Gemini OCR回避で高速化） ---
+PDF_TEXT_FILE="$EXTRACTED_DIR/${SAFE_NAME}_text.txt"
+echo "   テキスト抽出中..."
+python3 - "$PDF_PATH" "$PDF_TEXT_FILE" <<'PYEOF'
+import sys
+from pypdf import PdfReader
+
+pdf_path, out_path = sys.argv[1], sys.argv[2]
+reader = PdfReader(pdf_path)
+with open(out_path, "w", encoding="utf-8") as f:
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text() or ""
+        if text.strip():
+            f.write(f"--- ページ {i+1} ---\n{text}\n\n")
+print(f"   {len(reader.pages)}ページ抽出完了 → {out_path}")
+PYEOF
+
+PDF_TEXT_SIZE=$(wc -c < "$PDF_TEXT_FILE")
+echo "   テキストサイズ: ${PDF_TEXT_SIZE} bytes"
+
+# --- STAGE 1b: Gemini CLI で構造分析（抽出テキストを渡す） ---
+# 小さいPDF (<500KB text) は@構文でバイナリ直接渡し、大きいPDFはテキスト渡し
+# タイムアウト: 小=600秒, 大=1200秒
+if [ "$PDF_TEXT_SIZE" -lt 500000 ]; then
+  echo "   方式: @構文（PDF直接, timeout=600s）"
+  PDF_RELPATH="$(realpath --relative-to="$VAULT" "$PDF_PATH")"
+  (cd "$VAULT" && timeout 600 gemini -p "$(printf '%s\n\n@%s' "$PROMPT_CONTENT" "$PDF_RELPATH")" --yolo -o text) > "$GEMINI_RAW" 2>&1
+else
+  echo "   方式: テキスト渡し（大容量PDF向け, timeout=1200s）"
+  PDF_TEXT_RELPATH="$(realpath --relative-to="$VAULT" "$PDF_TEXT_FILE")"
+  (cd "$VAULT" && timeout 1200 gemini -p "$(printf '%s\n\n以下は教材PDFから抽出したテキストです:\n\n@%s' "$PROMPT_CONTENT" "$PDF_TEXT_RELPATH")" --yolo -o text) > "$GEMINI_RAW" 2>&1
+fi
 
 # Geminiの出力からMarkdownとJSONを分離
 # JSON部分を抽出（```json ... ``` ブロック）
