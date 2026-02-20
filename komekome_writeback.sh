@@ -24,9 +24,12 @@ if [ ! -f "$RESULTS_JSON" ]; then
 fi
 
 # ファイルロック（並行実行対策）
-LOCKFILE="/tmp/houjinzei_vault.lock"
-exec 200>"$LOCKFILE"
-flock -n 200 || { echo "エラー: 別のスクリプトが実行中です" >&2; exit 1; }
+# 親プロセス（komekome_sync.sh）が既にロック保持中なら再取得不要
+if [[ "${HOUJINZEI_LOCK_HELD:-}" != "1" ]]; then
+  LOCKFILE="/tmp/houjinzei_vault.lock"
+  exec 200>"$LOCKFILE"
+  flock -n 200 || { echo "エラー: 別のスクリプトが実行中です" >&2; exit 1; }
+fi
 
 python3 - "$RESULTS_JSON" "$VAULT" <<'PYEOF'
 import json
@@ -96,14 +99,14 @@ def validate_input(data):
         if not isinstance(item, dict):
             error_exit(f"results[{i}] はオブジェクトである必要があります")
 
-        for key in ["topic_id", "kome_count", "correct", "time_seconds"]:
+        for key in ["topic_id", "kome_count", "correct"]:
             if key not in item:
                 error_exit(f"results[{i}] に必須キーがありません: {key}")
 
         topic_id = item["topic_id"]
         kome_count = item["kome_count"]
         correct = item["correct"]
-        time_seconds = item["time_seconds"]
+        time_seconds = item.get("time_seconds", 0)
         mistakes = item.get("mistakes", [])
 
         if not isinstance(topic_id, str) or not topic_id.strip():

@@ -155,7 +155,8 @@ for sid in session_ids:
         continue
     url = f"{api_url}/api/komekome/result/{sid}/processed"
     req = urllib.request.Request(url, method='PUT',
-        headers={'Authorization': f'Bearer {api_token}', 'Content-Type': 'application/json'},
+        headers={'Authorization': f'Bearer {api_token}', 'Content-Type': 'application/json',
+                 'User-Agent': 'komekome-sync/1.0'},
         data=b'{}')
     try:
         urllib.request.urlopen(req)
@@ -172,7 +173,7 @@ PYEOF
 
   # results_file が存在する場合のみ writeback 実行
   if [[ -f "$results_file" ]]; then
-    bash "$SCRIPTS_DIR/komekome_writeback.sh" "$results_file"
+    HOUJINZEI_LOCK_HELD=1 bash "$SCRIPTS_DIR/komekome_writeback.sh" "$results_file"
     echo "pull 完了: writeback 実行済み ($now)"
   fi
 }
