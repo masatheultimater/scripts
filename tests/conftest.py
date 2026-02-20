@@ -1,7 +1,6 @@
 """法人税学習システム テスト共通fixture"""
 
 import json
-from pathlib import Path
 
 import pytest
 import yaml

@@ -1,7 +1,5 @@
 """Phase 4: process_answer テスト"""
 
-from datetime import date
-
 from lib.houjinzei_common import (
     GRADUATION_INTERVAL_INDEX,
     GRADUATION_MIN_KOME,

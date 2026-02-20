@@ -1,9 +1,6 @@
 """Phase 1: atomic_json_write テスト"""
 
 import json
-import os
-from pathlib import Path
-from unittest.mock import patch
 
 from lib.houjinzei_common import atomic_json_write
 

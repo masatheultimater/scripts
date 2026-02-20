@@ -114,18 +114,6 @@ PASS=0
 FAIL=0
 TOTAL=0
 
-assert_ok() {
-  local label="$1"
-  TOTAL=$((TOTAL + 1))
-  if [[ $? -eq 0 ]]; then
-    PASS=$((PASS + 1))
-    echo "  PASS: $label"
-  else
-    FAIL=$((FAIL + 1))
-    echo "  FAIL: $label" >&2
-  fi
-}
-
 # ============================================================
 echo ""
 echo "=========================================="

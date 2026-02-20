@@ -1,8 +1,5 @@
 """Phase 6: エラーハンドリングテスト"""
 
-import json
-from pathlib import Path
-
 import pytest
 
 from lib.houjinzei_common import (

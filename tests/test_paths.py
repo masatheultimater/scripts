@@ -1,7 +1,5 @@
 """Phase 2: VaultPaths テスト"""
 
-from pathlib import Path
-
 from lib.houjinzei_common import VaultPaths
 
 
