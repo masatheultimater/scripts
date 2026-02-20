@@ -1,0 +1,24 @@
+{
+  "name": "コメコメ暗記 v2",
+  "short_name": "コメコメ",
+  "description": "廣升式 記憶曲線メソッド — 法人税法暗記アプリ",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f1419",
+  "theme_color": "#ff8b3d",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

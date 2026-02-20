@@ -1,0 +1,7 @@
+name = "komekome"
+compatibility_date = "2024-12-01"
+pages_build_output_dir = "public"
+
+[[kv_namespaces]]
+binding = "KOMEKOME_STORE"
+id = "076b69f2f4d9454faebb88bb93cf63bd"

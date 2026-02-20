@@ -1,0 +1,17 @@
+{
+  "name": "komekome-pwa",
+  "version": "1.0.0",
+  "private": true,
+  "description": "コメコメ暗記 v2 — PWA + Cloudflare Pages",
+  "scripts": {
+    "build": "bash build.sh",
+    "deploy": "bash deploy.sh"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "dependencies": {
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  }
+}

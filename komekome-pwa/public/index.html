@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="コメコメ" />
+  <meta name="theme-color" content="#0f1419" />
+  <title>コメコメ暗記 v2</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0f1419;
+      -webkit-font-smoothing: antialiased;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      padding-left: env(safe-area-inset-left, 0px);
+      padding-right: env(safe-area-inset-right, 0px);
+    }
+    #root { min-height: 100vh; min-height: 100dvh; }
+    #debug-error { color: #ff6b6b; font-family: monospace; font-size: 12px; padding: 20px; white-space: pre-wrap; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <div id="debug-error"></div>
+  <script>
+    // Catch all errors and display on screen (for mobile debugging)
+    window.onerror = function(msg, url, line, col, err) {
+      var el = document.getElementById('debug-error');
+      el.textContent += 'ERROR: ' + msg + '\n' + (url||'') + ':' + line + ':' + col + '\n';
+      if (err && err.stack) el.textContent += err.stack + '\n';
+    };
+    window.addEventListener('unhandledrejection', function(e) {
+      var el = document.getElementById('debug-error');
+      el.textContent += 'PROMISE: ' + (e.reason ? (e.reason.message || e.reason) : 'unknown') + '\n';
+      if (e.reason && e.reason.stack) el.textContent += e.reason.stack + '\n';
+    });
+  </script>
+  <script src="/app.js?v=20260220021808" onerror="document.getElementById('debug-error').textContent += 'LOAD FAIL: app.js\n'"></script>
+  <script>
+    // Unregister old service workers to ensure fresh load
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(regs) {
+        regs.forEach(function(r) { r.unregister(); });
+      });
+    }
+  </script>
+</body>
+</html>
