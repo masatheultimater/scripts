@@ -89,7 +89,7 @@ function buildResultsPayload(problems) {
         topic_id: p.topicId,
         kome_count: p.komeTotal || 0,
         correct: lastEntry.result === "○",
-        time_seconds: lastEntry.timeSeconds || 0,
+        time_seconds: lastEntry.time_seconds || 0,
         mistakes: lastEntry.result !== "○" && lastEntry.memo ? [lastEntry.memo] : [],
         intervalIndex: p.intervalIndex || 0,
       };
