@@ -9,6 +9,7 @@ set -euo pipefail
 
 VAULT="${VAULT:-$HOME/vault/houjinzei}"
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+export PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
 INDEX_FILE="$VAULT/01_sources/_index.json"
 EXTRACTED_DIR="$VAULT/02_extracted"
 
@@ -92,15 +93,18 @@ echo "   テキストサイズ: ${PDF_TEXT_SIZE} bytes"
 
 # --- STAGE 1b: Gemini CLI で構造分析（抽出テキストを渡す） ---
 # 小さいPDF (<500KB text) は@構文でバイナリ直接渡し、大きいPDFはテキスト渡し
-# タイムアウト: 小=600秒, 大=1200秒
-if [ "$PDF_TEXT_SIZE" -lt 500000 ]; then
-  echo "   方式: @構文（PDF直接, timeout=600s）"
+# 定数: PDF_TEXT_SIZE_THRESHOLD=500000, GEMINI_TIMEOUT_SMALL=600, GEMINI_TIMEOUT_LARGE=1200
+PDF_SIZE_THRESHOLD=500000
+TIMEOUT_SMALL=600
+TIMEOUT_LARGE=1200
+if [ "$PDF_TEXT_SIZE" -lt "$PDF_SIZE_THRESHOLD" ]; then
+  echo "   方式: @構文（PDF直接, timeout=${TIMEOUT_SMALL}s）"
   PDF_RELPATH="$(realpath --relative-to="$VAULT" "$PDF_PATH")"
-  (cd "$VAULT" && timeout 600 gemini -p "$(printf '%s\n\n@%s' "$PROMPT_CONTENT" "$PDF_RELPATH")" --yolo -o text) > "$GEMINI_RAW" 2>&1
+  (cd "$VAULT" && timeout "$TIMEOUT_SMALL" gemini -p "$(printf '%s\n\n@%s' "$PROMPT_CONTENT" "$PDF_RELPATH")" --yolo -o text) > "$GEMINI_RAW" 2>&1
 else
-  echo "   方式: テキスト渡し（大容量PDF向け, timeout=1200s）"
+  echo "   方式: テキスト渡し（大容量PDF向け, timeout=${TIMEOUT_LARGE}s）"
   PDF_TEXT_RELPATH="$(realpath --relative-to="$VAULT" "$PDF_TEXT_FILE")"
-  (cd "$VAULT" && timeout 1200 gemini -p "$(printf '%s\n\n以下は教材PDFから抽出したテキストです:\n\n@%s' "$PROMPT_CONTENT" "$PDF_TEXT_RELPATH")" --yolo -o text) > "$GEMINI_RAW" 2>&1
+  (cd "$VAULT" && timeout "$TIMEOUT_LARGE" gemini -p "$(printf '%s\n\n以下は教材PDFから抽出したテキストです:\n\n@%s' "$PROMPT_CONTENT" "$PDF_TEXT_RELPATH")" --yolo -o text) > "$GEMINI_RAW" 2>&1
 fi
 
 # Geminiの出力からMarkdownとJSONを分離
@@ -124,8 +128,18 @@ if json_match:
     # JSONとして有効か検証
     try:
         data = json.loads(json_str)
-        with open(topics_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        # atomic write for topics.json
+        import tempfile
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(topics_file), suffix=".tmp", prefix=".aj_")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tf:
+                json.dump(data, tf, ensure_ascii=False, indent=2)
+                tf.write("\n")
+            os.replace(tmp, topics_file)
+        except BaseException:
+            try: os.unlink(tmp)
+            except OSError: pass
+            raise
         print("topics.json 抽出成功")
     except json.JSONDecodeError as e:
         print(f"JSONパースエラー: {e}", file=sys.stderr)
@@ -180,6 +194,8 @@ export INDEX_FILE PDF_FILENAME SOURCE_TYPE SAFE_NAME
 python3 - <<'PYEOF'
 import json
 import os
+import sys
+import tempfile
 from datetime import datetime
 
 index_file = os.environ["INDEX_FILE"]
@@ -198,8 +214,17 @@ index["processed"].append({
     "topics_file": f"{safe_name}_topics.json"
 })
 
-with open(index_file, "w", encoding="utf-8") as f:
-    json.dump(index, f, ensure_ascii=False, indent=2)
+# atomic write
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(index_file), suffix=".tmp", prefix=".aj_")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as tf:
+        json.dump(index, tf, ensure_ascii=False, indent=2)
+        tf.write("\n")
+    os.replace(tmp, index_file)
+except BaseException:
+    try: os.unlink(tmp)
+    except OSError: pass
+    raise
 PYEOF
 
 echo ""

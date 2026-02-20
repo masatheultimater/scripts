@@ -9,6 +9,7 @@ set -euo pipefail
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VAULT="${VAULT:-$HOME/vault/houjinzei}"
+export PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
 CATCHUP_LOG="$VAULT/logs/cron/catchup_$(date +%Y%m%d).log"
 mkdir -p "$(dirname "$CATCHUP_LOG")"
 
@@ -74,7 +75,7 @@ if [[ -n "$PENDING_PDFS" ]]; then
       continue
     fi
     log "📄 未取り込みPDF検知: $(basename "$pdf_path") (${source_type})"
-    if bash "$SCRIPTS_DIR/ingest.sh" "$pdf_path" "$source_type" 2>&1 | tee -a "$CATCHUP_LOG"; then
+    if bash "$SCRIPTS_DIR/ingest.sh" "$pdf_path" "$source_type" </dev/null 2>&1 | tee -a "$CATCHUP_LOG"; then
       log "✅ 取り込み完了: $(basename "$pdf_path")"
     else
       log "❌ 取り込み失敗: $(basename "$pdf_path") → ログを確認してください"
@@ -111,8 +112,11 @@ fi
 # --- 1.5. コメコメ Gist pull（未処理の結果があれば writeback） ---
 if [[ -f "$SCRIPTS_DIR/komekome_sync.sh" ]]; then
   log "コメコメ Gist pull 開始"
-  bash "$SCRIPTS_DIR/komekome_sync.sh" pull 2>&1 | tee -a "$CATCHUP_LOG" || true
-  log "コメコメ Gist pull 完了"
+  if bash "$SCRIPTS_DIR/komekome_sync.sh" pull 2>&1 | tee -a "$CATCHUP_LOG"; then
+    log "コメコメ sync pull 完了"
+  else
+    log "⚠️  コメコメ sync pull 失敗（終了コード: $?）→ ログを確認してください"
+  fi
 fi
 
 # --- 2. 週次バッチ（日曜に実行されるべき3スクリプト） ---

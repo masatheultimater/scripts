@@ -9,6 +9,7 @@ set -euo pipefail
 
 VAULT="${VAULT:-$HOME/vault/houjinzei}"
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
 LOG_DIR="$VAULT/logs"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/enrich_topics_${RUN_TS}.log"
@@ -75,15 +76,19 @@ import tempfile
 import time
 from pathlib import Path
 
-import yaml
+from lib.houjinzei_common import (
+    VaultPaths,
+    eprint,
+    read_frontmatter,
+)
 
-VAULT = Path(os.environ["VAULT"])
 DRY_RUN = os.environ["DRY_RUN"] == "true"
 LIMIT = int(os.environ["LIMIT"])
 SLEEP_SEC = int(os.environ["SLEEP_SEC"])
 
-TOPIC_DIR = VAULT / "10_論点"
-REFERENCE_NOTE = VAULT / "10_論点" / "損金算入" / "減価償却_普通.md"
+vp = VaultPaths(os.environ["VAULT"])
+TOPIC_DIR = vp.topics
+REFERENCE_NOTE = vp.topics / "損金算入" / "減価償却_普通.md"
 
 PLACEHOLDER_PATTERNS = [
     re.compile(r"[-*]\s*（.*?記入.*?）"),
@@ -93,22 +98,10 @@ PLACEHOLDER_PATTERNS = [
 ]
 
 
-def eprint(msg: str) -> None:
-    print(msg, file=sys.stderr)
-
-
 def read_note(md_path: Path):
-    text = md_path.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        return None, text
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        return None, text
-    try:
-        fm = yaml.safe_load(text[4:end]) or {}
-    except yaml.YAMLError:
-        return None, text
-    body = text[end + 5:]
+    fm, body = read_frontmatter(md_path)
+    if not fm:
+        return None, body
     return fm, body
 
 

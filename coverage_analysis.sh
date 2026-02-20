@@ -34,7 +34,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 VAULT="${VAULT:-$HOME/vault/houjinzei}"
-export VAULT DATE_ARG
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export VAULT DATE_ARG PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
 
 # ファイルロック（並行実行対策）
 LOCKFILE="/tmp/houjinzei_vault.lock"
@@ -47,63 +48,34 @@ from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
 
-import yaml
+from lib.houjinzei_common import (
+    VaultPaths,
+    STAGE_VALUES,
+    eprint,
+    normalize_stage,
+    parse_date,
+    read_frontmatter,
+    to_int,
+)
 
-VAULT = Path(os.environ["VAULT"])
 DATE_ARG = os.environ.get("DATE_ARG", "").strip()
-TOPIC_ROOT = VAULT / "10_論点"
-SOURCE_ROOT = VAULT / "30_ソース別"
-OUTPUT_ROOT = VAULT / "40_分析" / "カバレッジ"
+vp = VaultPaths(os.environ["VAULT"])
+TOPIC_ROOT = vp.topics
+SOURCE_ROOT = vp.source_map
+OUTPUT_ROOT = vp.analysis / "カバレッジ"
 
-VALID_STAGES = ("未着手", "学習中", "復習中", "卒業済")
 VALID_IMPORTANCE = ["A", "B", "C"]
-
-
-def normalize_stage(raw_stage: str, status: str) -> str:
-    """stage を正規化。欠損時は status から推定する。"""
-    if raw_stage in VALID_STAGES:
-        return raw_stage
-    if status == "卒業":
-        return "卒業済"
-    if status in ("未着手", "学習中", "復習中"):
-        return status
-    return "未着手"
-
-
-def eprint(msg: str) -> None:
-    print(msg, file=os.sys.stderr)
-
-
-def parse_date(s: str) -> date:
-    try:
-        return datetime.strptime(s, "%Y-%m-%d").date()
-    except ValueError:
-        raise ValueError(f"日付形式エラー: {s} (YYYY-MM-DD で指定してください)")
 
 
 def parse_frontmatter(md_path: Path) -> dict:
     try:
-        text = md_path.read_text(encoding="utf-8")
-    except OSError:
+        fm, _ = read_frontmatter(md_path)
+        return fm
+    except (OSError, Exception):
         return {}
 
-    if not text.startswith("---\n"):
-        return {}
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        return {}
-    try:
-        parsed = yaml.safe_load(text[4:end])
-    except yaml.YAMLError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
 
-
-def as_int(v) -> int:
-    try:
-        return int(str(v).strip())
-    except (ValueError, TypeError):
-        return 0
+as_int = to_int
 
 
 def pct(n: int, d: int) -> str:

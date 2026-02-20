@@ -8,6 +8,8 @@
 set -euo pipefail
 
 VAULT="${VAULT:-$HOME/vault/houjinzei}"
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
 LOG_DIR="$VAULT/logs"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/stage2_${RUN_TS}.log"

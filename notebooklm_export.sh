@@ -39,7 +39,8 @@ if [[ "$TYPE_FILTER" != "理論" && "$TYPE_FILTER" != "計算" && "$TYPE_FILTER"
 fi
 
 VAULT="${VAULT:-$HOME/vault/houjinzei}"
-export VAULT TYPE_FILTER
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export VAULT TYPE_FILTER PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
 
 LOCKFILE="/tmp/houjinzei_vault.lock"
 exec 200>"$LOCKFILE"
@@ -52,15 +53,20 @@ import re
 import hashlib
 import shutil
 import subprocess
-import yaml
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-VAULT = Path(os.environ["VAULT"])
+from lib.houjinzei_common import (
+    VaultPaths,
+    eprint,
+    read_frontmatter,
+)
+
 TYPE_FILTER = os.environ["TYPE_FILTER"]
-TOPIC_DIR = VAULT / "10_論点"
-OUTPUT_DIR = VAULT / "50_エクスポート"
+vp = VaultPaths(os.environ["VAULT"])
+TOPIC_DIR = vp.topics
+OUTPUT_DIR = vp.export
 TARGET_TYPES = ["理論", "計算"] if TYPE_FILTER == "all" else [TYPE_FILTER]
 HASH_FILE = OUTPUT_DIR / ".notebooklm_hash"
 CHAR_LIMIT = 500_000
@@ -72,22 +78,10 @@ PLACEHOLDER_PATTERNS = [
 ]
 
 
-def eprint(msg: str) -> None:
-    print(msg, file=os.sys.stderr)
-
-
 def read_note(md_path: Path):
-    text = md_path.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        return None, text
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        return None, text
-    try:
-        fm = yaml.safe_load(text[4:end]) or {}
-    except yaml.YAMLError:
-        return None, text
-    body = text[end + 5 :]
+    fm, body = read_frontmatter(md_path)
+    if not fm:
+        return None, body
     return fm, body
 
 

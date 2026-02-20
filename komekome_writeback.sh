@@ -8,6 +8,8 @@
 set -euo pipefail
 
 VAULT="${VAULT:-$HOME/vault/houjinzei}"
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
 
 if [ $# -ne 1 ]; then
   echo "使い方: bash komekome_writeback.sh <results_json_path>"
@@ -31,30 +33,27 @@ import json
 import os
 import re
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 
+from lib.houjinzei_common import (
+    VaultPaths,
+    GRADUATION_GAP_DAYS,
+    GRADUATION_INTERVAL_INDEX,
+    GRADUATION_MIN_KOME,
+    INTERVAL_DAYS,
+    KOME_THRESHOLD_REVIEW,
+    read_frontmatter,
+    to_int,
+    write_frontmatter,
+)
+
 
 def error_exit(message: str) -> None:
     print(f"エラー: {message}")
     sys.exit(1)
-
-
-def split_frontmatter(content: str):
-    if not content.startswith("---\n"):
-        return None, content
-
-    marker = "\n---\n"
-    end = content.find(marker, 4)
-    if end == -1:
-        return None, content
-
-    frontmatter = content[4:end]
-    body = content[end + len(marker) :]
-    return frontmatter, body
 
 
 def load_json(path: Path):
@@ -159,24 +158,20 @@ def build_topic_index(notes_root: Path):
     topic_index = {}  # key: topic field value → [Path, ...]
     parse_errors = []
 
-    for path in notes_root.rglob("*.md"):
+    for path in sorted(notes_root.rglob("*.md")):
         if path.name in ("README.md", "CLAUDE.md"):
             continue
 
         try:
-            content = path.read_text(encoding="utf-8")
+            fm, _ = read_frontmatter(path)
         except OSError as e:
             parse_errors.append(f"{path}: 読み込み失敗 ({e})")
             continue
-
-        frontmatter_text, _ = split_frontmatter(content)
-        if frontmatter_text is None:
-            continue
-
-        try:
-            fm = yaml.safe_load(frontmatter_text) or {}
         except yaml.YAMLError as e:
             parse_errors.append(f"{path}: frontmatter解析失敗 ({e})")
+            continue
+
+        if not fm:
             continue
 
         # パスベースの topic_id（generate_quiz.sh と同じ形式）
@@ -234,21 +229,11 @@ def write_session_log(log_path: Path, session_date: str, session_id: str, result
 
 
 def update_topic_note(path: Path, topic_result, session_date: str):
-    content = path.read_text(encoding="utf-8")
-    frontmatter_text, body = split_frontmatter(content)
-    if frontmatter_text is None:
+    data, body = read_frontmatter(path)
+    if not isinstance(data, dict) or not data:
         raise ValueError("frontmatterがありません")
 
-    data = yaml.safe_load(frontmatter_text) or {}
-    if not isinstance(data, dict):
-        raise ValueError("frontmatterがオブジェクト形式ではありません")
-
-    current_kome = data.get("kome_total", 0)
-    try:
-        current_kome = int(current_kome) if current_kome not in (None, "") else 0
-    except (ValueError, TypeError):
-        current_kome = 0
-
+    current_kome = to_int(data.get("kome_total", 0))
     new_kome = current_kome + topic_result["kome_count"]
     data["kome_total"] = new_kome
 
@@ -256,19 +241,8 @@ def update_topic_note(path: Path, topic_result, session_date: str):
     old_last_practiced = data.get("last_practiced", "")
     data["last_practiced"] = session_date
 
-    # --- 定数 ---
-    KOME_THRESHOLD = 16
-    GRAD_GAP_DAYS = 25
-    GRAD_MIN_KOME = 4
-    INTERVAL_DAYS = (3, 7, 14, 28)
-    GRADUATION_INTERVAL_INDEX = len(INTERVAL_DAYS)  # == 4
-
     # --- interval_index の読み取り ---
-    current_interval = data.get("interval_index")
-    try:
-        current_interval = int(current_interval) if current_interval not in (None, "") else 0
-    except (ValueError, TypeError):
-        current_interval = 0
+    current_interval = to_int(data.get("interval_index", 0))
 
     # コメコメ側から送信された intervalIndex があれば採用
     incoming_interval = topic_result.get("interval_index")
@@ -277,27 +251,19 @@ def update_topic_note(path: Path, topic_result, session_date: str):
 
     # --- stage / status 更新 ---
     current_status = data.get("status", "未着手")
-    calc_correct = data.get("calc_correct", 0)
-    calc_wrong = data.get("calc_wrong", 0)
-    try:
-        calc_correct = int(calc_correct) if calc_correct not in (None, "") else 0
-    except (ValueError, TypeError):
-        calc_correct = 0
-    try:
-        calc_wrong = int(calc_wrong) if calc_wrong not in (None, "") else 0
-    except (ValueError, TypeError):
-        calc_wrong = 0
+    calc_correct = to_int(data.get("calc_correct", 0))
+    calc_wrong = to_int(data.get("calc_wrong", 0))
 
     # 卒業済みノートは stage/status を巻き戻さない
     if current_status == "卒業":
         data["stage"] = data.get("stage", "卒業済")
     elif topic_result["correct"]:
-        data["stage"] = "復習中" if new_kome >= KOME_THRESHOLD else "学習中"
+        data["stage"] = "復習中" if new_kome >= KOME_THRESHOLD_REVIEW else "学習中"
 
         # status 遷移
         if current_status == "未着手":
             data["status"] = "学習中"
-        elif current_status == "学習中" and new_kome >= KOME_THRESHOLD:
+        elif current_status == "学習中" and new_kome >= KOME_THRESHOLD_REVIEW:
             data["status"] = "復習中"
 
         # interval_index をインクリメント（正解時）
@@ -306,7 +272,7 @@ def update_topic_note(path: Path, topic_result, session_date: str):
 
         # 卒業判定: interval_index ベース（優先）
         graduated = False
-        if current_interval >= GRADUATION_INTERVAL_INDEX and new_kome >= GRAD_MIN_KOME:
+        if current_interval >= GRADUATION_INTERVAL_INDEX and new_kome >= GRADUATION_MIN_KOME:
             graduated = True
 
         # レガシーフォールバック: gap ベース（interval_index 未設定ノート向け）
@@ -319,7 +285,7 @@ def update_topic_note(path: Path, topic_result, session_date: str):
                     old_d = datetime.strptime(str(old_last_practiced), "%Y-%m-%d").date()
                 new_d = datetime.strptime(session_date, "%Y-%m-%d").date()
                 gap = (new_d - old_d).days
-                if gap >= GRAD_GAP_DAYS and new_kome >= GRAD_MIN_KOME:
+                if gap >= GRADUATION_GAP_DAYS and new_kome >= GRADUATION_MIN_KOME:
                     graduated = True
             except ValueError:
                 pass
@@ -346,35 +312,13 @@ def update_topic_note(path: Path, topic_result, session_date: str):
         current_mistakes.extend(topic_result["mistakes"])
         data["mistakes"] = current_mistakes
 
-    dumped = yaml.safe_dump(
-        data,
-        allow_unicode=True,
-        sort_keys=False,
-        default_flow_style=False,
-        width=10000,
-    )
-
-    new_body = body if body.startswith("\n") else "\n" + body
-    new_content = f"---\n{dumped}---{new_body}"
-
-    # atomic write
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp", prefix=".wb_")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(new_content)
-        os.replace(tmp, str(path))
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    write_frontmatter(path, data, body)
 
 
 json_path = Path(sys.argv[1]).expanduser().resolve()
-vault = Path(sys.argv[2]).expanduser().resolve()
-notes_root = vault / "10_論点"
-log_dir = vault / "20_演習ログ" / "komekome"
+vp = VaultPaths(sys.argv[2])
+notes_root = vp.topics
+log_dir = vp.exercise_log / "komekome"
 
 if not json_path.exists():
     error_exit(f"JSONファイルが存在しません: {json_path}")

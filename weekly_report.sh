@@ -8,6 +8,8 @@
 set -euo pipefail
 
 VAULT="${VAULT:-$HOME/vault/houjinzei}"
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
 
 usage() {
   echo "使い方: bash weekly_report.sh [--date YYYY-MM-DD]"
@@ -38,7 +40,15 @@ from pathlib import Path
 
 import yaml
 
-VAULT = Path(sys.argv[1]).expanduser()
+from lib.houjinzei_common import (
+    VaultPaths,
+    normalize_stage,
+    read_frontmatter,
+    split_frontmatter,
+    to_int,
+)
+
+vp = VaultPaths(sys.argv[1])
 end_date_raw = sys.argv[2]
 
 try:
@@ -49,53 +59,10 @@ except ValueError:
 
 PERIOD_START = PERIOD_END - timedelta(days=6)
 
-TOPIC_ROOT = VAULT / "10_論点"
-LOG_ROOT = VAULT / "20_演習ログ"
-REPORT_DIR = VAULT / "40_分析" / "週次レポート"
+TOPIC_ROOT = vp.topics
+LOG_ROOT = vp.exercise_log
+REPORT_DIR = vp.analysis / "週次レポート"
 REPORT_PATH = REPORT_DIR / f"{PERIOD_END.isoformat()}.md"
-
-
-STAGE_VALUES = ("未着手", "学習中", "復習中", "卒業済")
-
-
-def split_frontmatter(content: str):
-    if not content.startswith("---\n"):
-        return "", content
-    marker = "\n---\n"
-    end = content.find(marker, 4)
-    if end == -1:
-        return "", content
-    return content[4:end], content[end + len(marker) :]
-
-
-def parse_frontmatter(text: str):
-    if not text.strip():
-        return {}
-    try:
-        parsed = yaml.safe_load(text)
-        if isinstance(parsed, dict):
-            return parsed
-    except yaml.YAMLError:
-        pass
-    return {}
-
-
-def normalize_stage(raw_stage: str, status: str) -> str:
-    """stage を正規化。欠損時は status から推定する。"""
-    if raw_stage in STAGE_VALUES:
-        return raw_stage
-    if status == "卒業":
-        return "卒業済"
-    if status in ("未着手", "学習中", "復習中"):
-        return status
-    return "未着手"
-
-
-def to_int(value) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return 0
 
 
 def parse_date(value):
@@ -187,12 +154,9 @@ weak_candidates = []
 
 for path in topic_files:
     try:
-        content = path.read_text(encoding="utf-8")
+        fm, _ = read_frontmatter(path)
     except OSError:
         continue
-
-    fm_text, _ = split_frontmatter(content)
-    fm = parse_frontmatter(fm_text)
 
     topic = str(fm.get("topic") or path.stem)
     raw_stage = str(fm.get("stage") or "").strip()
@@ -262,12 +226,9 @@ total_kome_increase = 0
 
 for path in log_files:
     try:
-        content = path.read_text(encoding="utf-8")
+        fm, body = read_frontmatter(path)
     except OSError:
         continue
-
-    fm_text, body = split_frontmatter(content)
-    fm = parse_frontmatter(fm_text)
 
     session_date = parse_date(fm.get("date"))
     if session_date is None:

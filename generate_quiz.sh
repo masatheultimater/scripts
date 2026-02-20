@@ -10,7 +10,7 @@ USAGE
 }
 
 DATE_ARG=""
-LIMIT_ARG="20"
+LIMIT_ARG="${DEFAULT_QUIZ_LIMIT:-20}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -50,7 +50,8 @@ if ! [[ "$LIMIT_ARG" =~ ^[0-9]+$ ]]; then
 fi
 
 VAULT="${VAULT:-$HOME/vault/houjinzei}"
-export VAULT DATE_ARG LIMIT_ARG
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export VAULT DATE_ARG LIMIT_ARG PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
 
 # ファイルロック（並行実行対策）
 LOCKFILE="/tmp/houjinzei_vault.lock"
@@ -64,49 +65,36 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from collections import Counter
 
-import yaml
+from lib.houjinzei_common import (
+    VaultPaths,
+    INTERVAL_DAYS,
+    eprint,
+    extract_body_sections,
+    parse_date,
+    read_frontmatter,
+    to_int,
+)
 
-VAULT = Path(os.environ["VAULT"])
 DATE_ARG = os.environ.get("DATE_ARG", "").strip()
 LIMIT = int(os.environ["LIMIT_ARG"])
 
-TOPIC_ROOT = VAULT / "10_論点"
-OUTPUT_PATH = VAULT / "50_エクスポート" / "komekome_import.json"
-
-# 間隔反復スケジュール
-INTERVAL_DAYS = (3, 7, 14, 28)
-
-
-def eprint(msg: str) -> None:
-    print(msg, file=os.sys.stderr)
-
-
-def parse_date(s: str) -> date:
-    try:
-        return datetime.strptime(s, "%Y-%m-%d").date()
-    except ValueError:
-        raise ValueError(f"日付形式エラー: {s} (YYYY-MM-DD で指定してください)")
+vp = VaultPaths(os.environ["VAULT"])
+TOPIC_ROOT = vp.topics
+OUTPUT_PATH = vp.export / "komekome_import.json"
 
 
 def parse_frontmatter(md_path: Path) -> dict:
-    text = md_path.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        return {}
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        return {}
     try:
-        parsed = yaml.safe_load(text[4:end])
-    except yaml.YAMLError:
+        fm, _ = read_frontmatter(md_path)
+        return fm
+    except Exception:
         return {}
-    return parsed if isinstance(parsed, dict) else {}
 
 
-def to_int(v) -> int:
-    try:
-        return int(str(v).strip())
-    except (ValueError, TypeError):
-        return 0
+def extract_body(md_path: Path) -> dict:
+    """論点ノートの本文から各セクションを抽出する。"""
+    _, body = read_frontmatter(md_path)
+    return extract_body_sections(body)
 
 
 if not TOPIC_ROOT.exists():
@@ -126,6 +114,12 @@ for md in sorted(TOPIC_ROOT.rglob("*.md")):
     topic_name = str(fm.get("topic", "") or "").strip() or md.stem
     category = str(fm.get("category", "") or "").strip()
     importance = str(fm.get("importance", "") or "").strip()
+    topic_type = fm.get("type", [])
+    if isinstance(topic_type, str):
+        topic_type = [topic_type]
+    sources = fm.get("sources", [])
+    if isinstance(sources, str):
+        sources = [sources]
     stage = str(fm.get("stage", "") or "").strip()
     last_practiced_raw = fm.get("last_practiced")
     status = str(fm.get("status", "") or "").strip()
@@ -145,12 +139,21 @@ for md in sorted(TOPIC_ROOT.rglob("*.md")):
 
     interval_index = to_int(fm.get("interval_index", 0))
 
+    body = extract_body(md)
+
+    # 本文が空テンプレートのノートはスキップ（出題しても意味がない）
+    if not body["summary"] and not body["mistakes"]:
+        eprint(f"  スキップ（空テンプレート）: {topic_name}")
+        continue
+
     records.append(
         {
             "topic_id": topic_id,
             "topic_name": topic_name,
             "category": category,
             "importance": importance,
+            "type": topic_type,
+            "sources": sources,
             "stage": stage,
             "status": status,
             "last_practiced": last_practiced,
@@ -158,6 +161,12 @@ for md in sorted(TOPIC_ROOT.rglob("*.md")):
             "calc_wrong": to_int(fm.get("calc_wrong", 0)),
             "kome_total": to_int(fm.get("kome_total", 0)),
             "interval_index": interval_index,
+            "display_name": body["display_name"],
+            "summary": body["summary"],
+            "steps": body["steps"],
+            "judgment": body["judgment"],
+            "mistakes": body["mistakes"],
+            "mistake_items": body["mistake_items"],
         }
     )
 
@@ -177,10 +186,18 @@ def add_priority(selected, selected_ids, candidates, reason):
             "topic_name": r["topic_name"],
             "category": r["category"],
             "importance": r["importance"],
+            "type": r["type"],
+            "sources": r["sources"],
             "reason": reason,
             "calc_correct": r["calc_correct"],
             "calc_wrong": r["calc_wrong"],
             "intervalIndex": r["interval_index"],
+            "display_name": r["display_name"],
+            "summary": r["summary"],
+            "steps": r["steps"],
+            "judgment": r["judgment"],
+            "mistakes": r["mistakes"],
+            "mistake_items": r["mistake_items"],
         }
         selected.append(item)
         selected_ids.add(r["topic_id"])
