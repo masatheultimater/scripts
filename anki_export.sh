@@ -70,6 +70,7 @@ done
 
 VAULT="${VAULT:-$HOME/vault/houjinzei}"
 export VAULT DRY_RUN DECK_NAME ANKI_HOST ANKI_PORT FORCE_FLAG
+export PYTHONPATH="/home/masa/scripts"
 
 LOCKFILE="/tmp/houjinzei_vault.lock"
 exec 200>"$LOCKFILE"
@@ -77,90 +78,19 @@ flock -n 200 || { echo "エラー: 別のスクリプトが実行中です" >&2;
 
 python3 - <<'PY'
 import datetime
-import html
 import json
 import os
 import re
-import subprocess
-import urllib.request
 from pathlib import Path
 
-import yaml
-
-
-def eprint(msg: str) -> None:
-    print(msg, file=os.sys.stderr)
-
-
-def anki_request(action, params=None, host="172.29.64.1", port=8765):
-    payload = {"action": action, "version": 6}
-    if params:
-        payload["params"] = params
-    req = urllib.request.Request(
-        f"http://{host}:{port}",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        result = json.loads(resp.read())
-        if result.get("error"):
-            raise RuntimeError(f'AnkiConnect error: {result["error"]}')
-        return result.get("result")
-
-
-def detect_wsl_host():
-    try:
-        out = subprocess.check_output(["ip", "route", "show", "default"], text=True)
-        return out.split()[2]
-    except Exception:
-        return "172.29.64.1"
-
-
-def read_note(md_path):
-    text = md_path.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        return None, text
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        return None, text
-    fm = yaml.safe_load(text[4:end]) or {}
-    body = text[end + 5 :]
-    return fm, body
-
-
-def extract_section(body, heading):
-    """## heading の内容を抽出"""
-    lines = body.splitlines()
-    result = []
-    in_section = False
-    for line in lines:
-        if re.match(r"^#{1,3}\s+", line):
-            if heading in line:
-                in_section = True
-                continue
-            elif in_section:
-                break
-        if in_section:
-            result.append(line)
-    return "\n".join(result).strip()
-
-
-def to_html_block(text: str) -> str:
-    if not text:
-        return ""
-    return html.escape(text).replace("\n", "<br>")
+from lib.anki_common import anki_request, detect_anki_host, sanitize_anki_tag, to_html_block
+from lib.houjinzei_common import eprint, extract_body_sections, read_frontmatter
 
 
 def to_str(value) -> str:
     if value is None:
         return ""
     return str(value).strip()
-
-
-def sanitize_tag(value: str) -> str:
-    val = to_str(value)
-    val = re.sub(r"\s+", "_", val)
-    return val if val else "未分類"
 
 
 def load_exported(path: Path):
@@ -191,6 +121,21 @@ def print_candidates(candidates):
         print(f"- {item['topic']} / {item['category']} ({item['path']})")
 
 
+def _extract_named_section(body: str, heading: str) -> str:
+    marker = f"\n## {heading}\n"
+    start = body.find(marker)
+    if start == -1:
+        if body.startswith(f"## {heading}\n"):
+            start = 0
+        else:
+            return ""
+    content_start = start + len(marker)
+    next_h = re.search(r"\n##\s+", body[content_start:])
+    if not next_h:
+        return body[content_start:].strip()
+    return body[content_start:content_start + next_h.start()].strip()
+
+
 def main():
     vault = Path(os.environ["VAULT"])
     dry_run = os.environ.get("DRY_RUN", "0") == "1"
@@ -215,9 +160,10 @@ def main():
     for md_path in sorted(topic_dir.rglob("*.md")):
         if md_path.name in ("README.md", "CLAUDE.md"):
             continue
-        fm, body = read_note(md_path)
+        fm, body = read_frontmatter(md_path)
         if not isinstance(fm, dict):
             continue
+
         status = to_str(fm.get("status"))
         if status != "卒業":
             continue
@@ -249,7 +195,7 @@ def main():
         print("処理対象がないため終了します。")
         return
 
-    resolved_host = detect_wsl_host() if anki_host == "auto" else anki_host
+    resolved_host = detect_anki_host() if anki_host == "auto" else anki_host
     connected = False
     version = None
     connection_error = None
@@ -277,10 +223,11 @@ def main():
         fm = item["fm"]
         body = item["body"]
 
-        summary = extract_section(body, "概要")
-        steps = extract_section(body, "計算手順")
-        theory_keywords = extract_section(body, "理論キーワード")
-        pitfalls = extract_section(body, "間違えやすいポイント")
+        sections = extract_body_sections(body)
+        summary = sections.get("summary", "")
+        steps = sections.get("steps", "")
+        pitfalls = sections.get("mistakes", "")
+        theory_keywords = _extract_named_section(body, "理論キーワード")
 
         importance = to_str(fm.get("importance"))
         conditions = to_str(fm.get("conditions"))
@@ -313,7 +260,7 @@ def main():
                     "Front": "<br><br>".join(front_parts),
                     "Back": "<br>".join(back_parts),
                 },
-                "tags": [today_tag, sanitize_tag(item["category"])],
+                "tags": [today_tag, sanitize_anki_tag(item["category"])],
             }
         )
 

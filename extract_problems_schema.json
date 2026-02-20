@@ -1,0 +1,56 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "book": {
+      "type": "string",
+      "description": "問題集名"
+    },
+    "problems": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "number": {
+            "type": "string",
+            "description": "問題番号（例: 問題1, 問題2-1）"
+          },
+          "title": {
+            "type": "string",
+            "description": "問題タイトル・テーマ（例: 受取配当金の益金不算入）"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["計算", "理論"],
+            "description": "問題の種別"
+          },
+          "topics": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "関連する法人税法の論点名"
+          },
+          "page": {
+            "type": "integer",
+            "description": "問題が記載されているページ番号"
+          },
+          "time_min": {
+            "type": "integer",
+            "description": "解答時間目安（分）。PDFに記載があれば抽出、なければ0"
+          },
+          "rank": {
+            "type": "string",
+            "description": "難易度ランク（A, B, C等）。PDFに記載があれば抽出、なければ空文字"
+          },
+          "scope": {
+            "type": "string",
+            "enum": ["個別", "総合"],
+            "description": "個別問題か総合問題か"
+          }
+        },
+        "required": ["number", "title", "type", "topics", "page", "time_min", "rank", "scope"]
+      }
+    }
+  },
+  "required": ["book", "problems"]
+}
