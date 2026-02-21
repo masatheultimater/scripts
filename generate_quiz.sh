@@ -450,3 +450,14 @@ if [[ -f "$SYNC_SCRIPT" ]]; then
 else
   echo "⚠️  komekome_sync.sh が見つかりません: $SYNC_SCRIPT" >&2
 fi
+
+# Obsidianダッシュボード生成（失敗してもquiz生成は成功扱い）
+DASHBOARD_SCRIPT="$SCRIPTS_DIR/dashboard.sh"
+if [[ -f "$DASHBOARD_SCRIPT" ]]; then
+  echo "ダッシュボード生成開始: $DASHBOARD_SCRIPT"
+  bash "$DASHBOARD_SCRIPT" \
+    && echo "ダッシュボード生成成功" \
+    || { echo "⚠️  dashboard.sh 実行失敗（quiz生成は成功済み）" >&2; true; }
+else
+  echo "⚠️  dashboard.sh が見つかりません: $DASHBOARD_SCRIPT" >&2
+fi

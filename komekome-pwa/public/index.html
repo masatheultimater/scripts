@@ -41,12 +41,13 @@
       if (e.reason && e.reason.stack) el.textContent += e.reason.stack + '\n';
     });
   </script>
-  <script src="/app.js?v=20260221112453" onerror="document.getElementById('debug-error').textContent += 'LOAD FAIL: app.js\n'"></script>
+  <script src="/app.js?v=20260221115235" onerror="document.getElementById('debug-error').textContent += 'LOAD FAIL: app.js\n'"></script>
   <script>
-    // Unregister old service workers to ensure fresh load
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.getRegistrations().then(function(regs) {
-        regs.forEach(function(r) { r.unregister(); });
+      window.addEventListener('load', function() {
+        navigator.serviceWorker.register('/sw.js')
+          .then(function(reg) { console.log('SW registered:', reg.scope); })
+          .catch(function(err) { console.error('SW registration failed:', err); });
       });
     }
   </script>
