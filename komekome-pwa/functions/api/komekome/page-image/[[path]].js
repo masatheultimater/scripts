@@ -42,7 +42,7 @@ export async function onRequestGet(context) {
     return json({ error: "Path required" }, 400, request);
   }
 
-  const key = pathParts.join("/");
+  const key = pathParts.map(p => decodeURIComponent(p)).join("/");
   const object = await env.KOMEKOME_PAGES.get(key);
 
   if (!object) {
