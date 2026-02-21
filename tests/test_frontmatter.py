@@ -149,3 +149,20 @@ def test_extract_sections_mistake_items():
     result = extract_body_sections(body)
     assert len(result["mistake_items"]) == 2
     assert "特別償却と割増償却の混同" in result["mistake_items"][0]
+
+
+def test_extract_body_sections_statutes():
+    body = """
+# テスト論点
+
+## 概要
+概要テキスト。
+
+## 関連条文
+- 法人税法第22条
+- 法人税法施行令第13条
+"""
+    from lib.houjinzei_common import extract_body_sections
+    result = extract_body_sections(body)
+    assert "法人税法第22条" in result["statutes"]
+    assert "法人税法施行令第13条" in result["statutes"]

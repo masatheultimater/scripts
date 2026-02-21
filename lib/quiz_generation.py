@@ -9,7 +9,12 @@ from collections import Counter
 from datetime import date
 from typing import Callable
 
-from lib.houjinzei_common import parse_date
+from lib.houjinzei_common import (
+    MIN_NEW_PROBLEMS,
+    MIN_REVIEW_PROBLEMS,
+    NEW_REVIEW_RATIO,
+    parse_date,
+)
 
 
 def build_carryover_topics(
@@ -144,3 +149,40 @@ def add_priority_balanced_with_problem_cap(
         selected_topic_count += 1
 
     return current_problem_count, selected_topic_count, cap_reached
+
+
+def split_new_review_budget(
+    total_budget: int,
+    new_review_ratio: float,
+    min_new: int,
+    min_review: int,
+) -> tuple[int, int]:
+    """Split total_budget into (new_budget, review_budget).
+
+    Respects min_new/min_review floors. If total_budget is too small,
+    review gets priority. Returns (0, total_budget) if total_budget < min_new.
+    """
+    if total_budget <= 0:
+        return 0, 0
+
+    new_budget = max(min_new, int(total_budget * new_review_ratio))
+    review_budget = total_budget - new_budget
+
+    if review_budget < min_review:
+        review_budget = min_review
+        new_budget = total_budget - review_budget
+
+    if new_budget < 0:
+        new_budget = 0
+        review_budget = total_budget
+
+    return new_budget, review_budget
+
+
+def filter_scope_candidates(
+    records: list[dict],
+    scope_categories: list[str],
+) -> list[dict]:
+    """Filter records to only those matching scope_categories."""
+    scope_set = set(scope_categories)
+    return [r for r in records if r.get("category", "") in scope_set]

@@ -81,6 +81,9 @@ from lib.houjinzei_common import (
     INTERVAL_DAYS,
     MAX_CARRYOVER,
     MAX_DAILY_PROBLEMS,
+    MIN_NEW_PROBLEMS,
+    MIN_REVIEW_PROBLEMS,
+    NEW_REVIEW_RATIO,
     atomic_json_write,
     eprint,
     parse_date,
@@ -97,6 +100,8 @@ from lib.learning_efficiency import (
 from lib.quiz_generation import (
     add_priority_balanced_with_problem_cap,
     build_carryover_topics,
+    filter_scope_candidates,
+    split_new_review_budget,
 )
 from lib.topic_problem_map import load_topic_problem_map
 
@@ -109,6 +114,7 @@ TODAY_OUTPUT = vp.export / "today_problems.json"
 COMPAT_OUTPUT = vp.export / "komekome_import.json"
 DASHBOARD_OUTPUT = vp.export / "dashboard_data.json"
 RESULTS_OUTPUT = vp.export / "komekome_results.json"
+SCHEDULE_PATH = vp.weekly_schedule
 
 # ── Load mapping + problems ──
 topic_map = load_topic_problem_map(os.environ["VAULT"])
@@ -147,6 +153,13 @@ if not TOPIC_ROOT.exists():
 base_date = date.today() if not DATE_ARG else parse_date(DATE_ARG)
 runtime_now = datetime.now()
 base_datetime = runtime_now if not DATE_ARG else datetime.combine(base_date, runtime_now.time())
+
+# ── Load weekly schedule ──
+schedule = load_json_or_default(SCHEDULE_PATH, {})
+scope_categories = schedule.get("scope_categories", [])
+has_schedule = bool(scope_categories)
+if has_schedule:
+    eprint(f"週間スケジュール: {scope_categories}")
 
 records = []
 for md in sorted(TOPIC_ROOT.rglob("*.md")):
@@ -285,109 +298,238 @@ def add_priority_balanced(selected, selected_ids, candidates, reason, bucket, ma
     )
 
 
-# ---- 優先度0: 卒業後定期復習 (最大2問) ----
-if graduated_review:
-    ordered_graduated = sorted(
-        graduated_review,
-        key=lambda r: (-calc_priority_score(r, 0, base_datetime), r["topic_id"]),
+if has_schedule:
+    # Schedule mode: split into new/review budgets
+    remaining_budget = MAX_DAILY_PROBLEMS - carryover_count
+    new_budget, review_budget = split_new_review_budget(
+        remaining_budget, NEW_REVIEW_RATIO, MIN_NEW_PROBLEMS, MIN_REVIEW_PROBLEMS,
     )
-    for r in ordered_graduated[:2]:
-        if len(selected) >= LIMIT or selection_stopped_by_problem_cap:
-            break
-        if r["topic_id"] in selected_ids:
-            continue
-        topic_problem_count = len(mappings.get(r["topic_id"], []))
-        if (
-            selected_problem_count + topic_problem_count > MAX_DAILY_PROBLEMS
-            and selected_topic_count > 0
-        ):
-            selection_stopped_by_problem_cap = True
-            break
-        if len(selected) < LIMIT and r["topic_id"] not in selected_ids:
-            selected.append(
-                {
-                    **r,
-                    "reason": "卒業後復習",
-                    "priority_bucket": 0,
-                    "priority_score": calc_priority_score(r, 0, base_datetime),
-                }
-            )
+    eprint(f"予算配分: 新規={new_budget}問, 復習={review_budget}問 (繰越={carryover_count}問)")
+
+    # ── Review pool (existing SRS buckets 0-4) ──
+    review_problem_cap = carryover_count + review_budget
+
+    # Priority 0: graduated review
+    if graduated_review:
+        ordered_graduated = sorted(
+            graduated_review,
+            key=lambda r: (-calc_priority_score(r, 0, base_datetime), r["topic_id"]),
+        )
+        for r in ordered_graduated[:2]:
+            if len(selected) >= LIMIT or selection_stopped_by_problem_cap:
+                break
+            if r["topic_id"] in selected_ids:
+                continue
+            topic_problem_count = len(mappings.get(r["topic_id"], []))
+            if (
+                selected_problem_count + topic_problem_count > review_problem_cap
+                and selected_topic_count > 0
+            ):
+                selection_stopped_by_problem_cap = True
+                break
+            selected.append({
+                **r,
+                "reason": "卒業後復習",
+                "priority_bucket": 0,
+                "priority_score": calc_priority_score(r, 0, base_datetime),
+                "selection_type": "review",
+            })
             selected_ids.add(r["topic_id"])
             category_count[r["category"]] += 1
             selected_problem_count += topic_problem_count
             selected_topic_count += 1
 
-# ---- 優先度1: 弱点集中24h ----
-focus_24h = [
-    r for r in records
-    if is_focus_active(r.get("focus_until_at"), base_datetime)
-    and r["stage"] in ("学習中", "復習中")
-]
-add_priority_balanced(selected, selected_ids, focus_24h, "弱点集中24h", 1, mappings)
+    def add_review_balanced(candidates, reason, bucket):
+        global selected_problem_count, selected_topic_count, selection_stopped_by_problem_cap
+        if selection_stopped_by_problem_cap:
+            return
+        selected_problem_count, selected_topic_count, selection_stopped_by_problem_cap = add_priority_balanced_with_problem_cap(
+            selected=selected,
+            selected_ids=selected_ids,
+            candidates=candidates,
+            reason=reason,
+            bucket=bucket,
+            limit=LIMIT,
+            max_category_ratio=MAX_CATEGORY_RATIO,
+            category_count=category_count,
+            mappings=mappings,
+            current_problem_count=selected_problem_count,
+            max_daily_problems=review_problem_cap,
+            selected_topic_count=selected_topic_count,
+            priority_fn=lambda r, b: calc_priority_score(r, b, base_datetime),
+        )
 
-# ---- 優先度1.2: needs_focus (連続不正解トピック) ----
-needs_focus = [
-    r for r in records
-    if r["calc_wrong"] >= 2
-    and r["calc_wrong"] > r["calc_correct"]
-    and r["stage"] in ("学習中", "復習中")
-]
-add_priority_balanced(selected, selected_ids, needs_focus, "弱点集中", 1.2, mappings)
+    # Review priorities 1-4 (same as before)
+    focus_24h = [
+        r for r in records
+        if is_focus_active(r.get("focus_until_at"), base_datetime)
+        and r["stage"] in ("学習中", "復習中")
+    ]
+    add_review_balanced(focus_24h, "弱点集中24h", 1)
+    needs_focus = [
+        r for r in records
+        if r["calc_wrong"] >= 2
+        and r["calc_wrong"] > r["calc_correct"]
+        and r["stage"] in ("学習中", "復習中")
+    ]
+    add_review_balanced(needs_focus, "弱点集中", 1.2)
+    lapsed = []
+    for r in records:
+        if r["last_practiced"] is None or r["interval_index"] < 0:
+            continue
+        idx = r["interval_index"]
+        if idx >= len(INTERVAL_DAYS):
+            continue
+        required_days = INTERVAL_DAYS[idx]
+        overdue = (base_date - r["last_practiced"]).days - required_days
+        if overdue >= 7:
+            lapsed.append({**r, "overdue_days": overdue})
+    add_review_balanced(lapsed, "失効復習", 1.5)
+    interval_due = interval_review_due()
+    if interval_due:
+        add_review_balanced(interval_due, "間隔復習", 2)
+    add_review_balanced(review_due(3), "3日後復習", 3)
+    add_review_balanced(review_due(7), "7日後復習", 3)
+    add_review_balanced(review_due(14), "14日後復習", 3)
+    add_review_balanced(review_due(28), "28日後復習", 3)
+    add_review_balanced(
+        [r for r in records if r["stage"] in ("学習中", "復習中") and r["calc_wrong"] > r["calc_correct"]],
+        "弱点補強", 4,
+    )
 
-# ---- 優先度1.5: 失効検出 (期日7日以上超過) ----
-lapsed = []
-for r in records:
-    if r["last_practiced"] is None or r["interval_index"] < 0:
-        continue
-    idx = r["interval_index"]
-    if idx >= len(INTERVAL_DAYS):
-        continue
-    required_days = INTERVAL_DAYS[idx]
-    overdue = (base_date - r["last_practiced"]).days - required_days
-    if overdue >= 7:
-        lapsed.append({**r, "overdue_days": overdue})
-add_priority_balanced(selected, selected_ids, lapsed, "失効復習", 1.5, mappings)
+    # Tag review topics
+    for s in selected:
+        if "selection_type" not in s:
+            s["selection_type"] = "review"
 
-# ---- 優先度2: interval_index ベース復習 ----
-interval_due = interval_review_due()
-if interval_due:
-    add_priority_balanced(selected, selected_ids, interval_due, "間隔復習", 2, mappings)
+    review_actual = selected_problem_count - carryover_count
 
-# ---- 優先度3: レガシー復習 ----
-add_priority_balanced(selected, selected_ids, review_due(3), "3日後復習", 3, mappings)
-add_priority_balanced(selected, selected_ids, review_due(7), "7日後復習", 3, mappings)
-add_priority_balanced(selected, selected_ids, review_due(14), "14日後復習", 3, mappings)
-add_priority_balanced(selected, selected_ids, review_due(28), "28日後復習", 3, mappings)
+    # ── New pool: scope_categories の未着手トピック ──
+    selection_stopped_by_problem_cap = False
+    new_candidates = filter_scope_candidates(
+        [r for r in records if r["stage"] == "未着手"],
+        scope_categories,
+    )
+    new_selected = []
+    new_selected_ids = set(selected_ids)
+    new_category_count = Counter(category_count)
+    new_problem_count = selected_problem_count
+    new_topic_count = selected_topic_count
 
-# ---- 優先度4: 弱点補強 ----
-add_priority_balanced(
-    selected, selected_ids,
-    [r for r in records if r["stage"] in ("学習中", "復習中") and r["calc_wrong"] > r["calc_correct"]],
-    "弱点補強",
-    4,
-    mappings,
-)
+    # Actual new budget: use remaining capacity (review may have used less than budget)
+    actual_new_cap = MAX_DAILY_PROBLEMS
 
-# ---- 優先度5: 新規A論点 ----
-add_priority_balanced(
-    selected, selected_ids,
-    [r for r in records if r["stage"] == "未着手" and r["importance"] == "A"],
-    "新規A論点",
-    5,
-    mappings,
-)
+    new_problem_count, new_topic_count, _ = add_priority_balanced_with_problem_cap(
+        selected=new_selected,
+        selected_ids=new_selected_ids,
+        candidates=new_candidates,
+        reason="新規(スケジュール)",
+        bucket=5,
+        limit=LIMIT,
+        max_category_ratio=1.0,  # scope is already filtered
+        category_count=new_category_count,
+        mappings=mappings,
+        current_problem_count=new_problem_count,
+        max_daily_problems=actual_new_cap,
+        selected_topic_count=new_topic_count,
+        priority_fn=lambda r, b: calc_priority_score(r, b, base_datetime),
+    )
 
-# ---- 優先度6: 新規B論点 ----
-add_priority_balanced(
-    selected, selected_ids,
-    [r for r in records if r["stage"] == "未着手" and r["importance"] == "B"],
-    "新規B論点",
-    6,
-    mappings,
-)
+    for s in new_selected:
+        s["selection_type"] = "new"
+    selected.extend(new_selected)
+    selected_ids.update(new_selected_ids)
+    selected_problem_count = new_problem_count
+    selected_topic_count = new_topic_count
+
+    eprint(f"実績: 復習={review_actual}問, 新規={new_problem_count - carryover_count - review_actual}問")
+
+else:
+    # No schedule: original bucket-based selection (unchanged)
+    # ---- 優先度0: 卒業後定期復習 (最大2問) ----
+    if graduated_review:
+        ordered_graduated = sorted(
+            graduated_review,
+            key=lambda r: (-calc_priority_score(r, 0, base_datetime), r["topic_id"]),
+        )
+        for r in ordered_graduated[:2]:
+            if len(selected) >= LIMIT or selection_stopped_by_problem_cap:
+                break
+            if r["topic_id"] in selected_ids:
+                continue
+            topic_problem_count = len(mappings.get(r["topic_id"], []))
+            if (
+                selected_problem_count + topic_problem_count > MAX_DAILY_PROBLEMS
+                and selected_topic_count > 0
+            ):
+                selection_stopped_by_problem_cap = True
+                break
+            if len(selected) < LIMIT and r["topic_id"] not in selected_ids:
+                selected.append(
+                    {
+                        **r,
+                        "reason": "卒業後復習",
+                        "priority_bucket": 0,
+                        "priority_score": calc_priority_score(r, 0, base_datetime),
+                    }
+                )
+                selected_ids.add(r["topic_id"])
+                category_count[r["category"]] += 1
+                selected_problem_count += topic_problem_count
+                selected_topic_count += 1
+
+    focus_24h = [
+        r for r in records
+        if is_focus_active(r.get("focus_until_at"), base_datetime)
+        and r["stage"] in ("学習中", "復習中")
+    ]
+    add_priority_balanced(selected, selected_ids, focus_24h, "弱点集中24h", 1, mappings)
+    needs_focus = [
+        r for r in records
+        if r["calc_wrong"] >= 2
+        and r["calc_wrong"] > r["calc_correct"]
+        and r["stage"] in ("学習中", "復習中")
+    ]
+    add_priority_balanced(selected, selected_ids, needs_focus, "弱点集中", 1.2, mappings)
+    lapsed = []
+    for r in records:
+        if r["last_practiced"] is None or r["interval_index"] < 0:
+            continue
+        idx = r["interval_index"]
+        if idx >= len(INTERVAL_DAYS):
+            continue
+        required_days = INTERVAL_DAYS[idx]
+        overdue = (base_date - r["last_practiced"]).days - required_days
+        if overdue >= 7:
+            lapsed.append({**r, "overdue_days": overdue})
+    add_priority_balanced(selected, selected_ids, lapsed, "失効復習", 1.5, mappings)
+    interval_due = interval_review_due()
+    if interval_due:
+        add_priority_balanced(selected, selected_ids, interval_due, "間隔復習", 2, mappings)
+    add_priority_balanced(selected, selected_ids, review_due(3), "3日後復習", 3, mappings)
+    add_priority_balanced(selected, selected_ids, review_due(7), "7日後復習", 3, mappings)
+    add_priority_balanced(selected, selected_ids, review_due(14), "14日後復習", 3, mappings)
+    add_priority_balanced(selected, selected_ids, review_due(28), "28日後復習", 3, mappings)
+    add_priority_balanced(
+        selected, selected_ids,
+        [r for r in records if r["stage"] in ("学習中", "復習中") and r["calc_wrong"] > r["calc_correct"]],
+        "弱点補強", 4, mappings,
+    )
+    add_priority_balanced(
+        selected, selected_ids,
+        [r for r in records if r["stage"] == "未着手" and r["importance"] == "A"],
+        "新規A論点", 5, mappings,
+    )
+    add_priority_balanced(
+        selected, selected_ids,
+        [r for r in records if r["stage"] == "未着手" and r["importance"] == "B"],
+        "新規B論点", 6, mappings,
+    )
 
 # ── 出力: today_problems.json ──
 total_problems = carryover_count
+for ct in carryover_topics:
+    ct["selection_type"] = "carryover"
 topics_out = list(carryover_topics)
 
 
@@ -438,6 +580,7 @@ for s in selected:
             "trigger": "calc_wrong>=2",
         },
         "problems": problems_out,
+        "selection_type": s.get("selection_type", "review"),
     })
 
 TODAY_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
@@ -445,12 +588,16 @@ TODAY_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
 payload = {
     "generated_date": base_date.strftime("%Y-%m-%d"),
     "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    "schema_version": 3,
-    "selection_policy": "srs-v3-problemcap40-carryover",
+    "schema_version": 4,
+    "selection_policy": "srs-v4-schedule-hints",
     "dashboard_key": "learning_dashboard_v1",
     "carryover_count": carryover_count,
     "total_topics": len(topics_out),
     "total_problems": total_problems,
+    "weekly_schedule": {
+        "week_start": schedule.get("week_start", ""),
+        "scope_categories": scope_categories,
+    } if has_schedule else None,
     "topics": topics_out,
 }
 

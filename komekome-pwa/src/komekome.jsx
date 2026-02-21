@@ -561,25 +561,59 @@ function DashboardView({ dashboardData, onBack }) {
   );
 }
 
-// ── Markdown-like section renderer ──
+// ── Table figure component ──
+function TableFigure({ rows }) {
+  if (!rows || rows.length === 0) return null;
+  // Parse rows: first non-separator row is header
+  const parsed = rows.map(r => ({
+    cells: r.split("|").filter(Boolean).map(c => c.trim()),
+    isSep: /^[-:| ]+$/.test(r.replace(/\|/g, "").trim()),
+  })).filter(r => !r.isSep);
+  if (parsed.length === 0) return null;
+  const header = parsed[0];
+  const body = parsed.slice(1);
+  return (
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", marginTop: 6, marginBottom: 6 }}>
+      <div style={{ display: "flex", gap: 0, background: `${C.accent}18`, padding: "6px 8px", borderBottom: `1px solid ${C.border}` }}>
+        {header.cells.map((c, j) => <span key={j} style={{ flex: 1, fontSize: 11, fontWeight: 700, color: C.accent }}>{c}</span>)}
+      </div>
+      {body.map((row, i) => (
+        <div key={i} style={{ display: "flex", gap: 0, padding: "5px 8px", borderBottom: i < body.length - 1 ? `1px solid ${C.border}` : "none", background: i % 2 === 0 ? "transparent" : `${C.surface2}40` }}>
+          {row.cells.map((c, j) => <span key={j} style={{ flex: 1, fontSize: 11, color: C.text }}>{c}</span>)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Markdown-like section renderer (2-pass: groups table rows) ──
 function SectionContent({ text }) {
   if (!text) return null;
   const lines = text.split("\n");
+  // Group consecutive table rows
+  const blocks = [];
+  let tableBuffer = [];
+  const flushTable = () => {
+    if (tableBuffer.length > 0) { blocks.push({ type: "table", rows: [...tableBuffer] }); tableBuffer = []; }
+  };
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("| ") && trimmed.endsWith("|")) {
+      tableBuffer.push(trimmed);
+    } else {
+      flushTable();
+      blocks.push({ type: "line", text: trimmed });
+    }
+  }
+  flushTable();
+
   return (
     <div style={{ fontSize: 13, lineHeight: 1.8, color: C.text }}>
-      {lines.map((line, i) => {
-        const trimmed = line.trim();
+      {blocks.map((block, i) => {
+        if (block.type === "table") return <TableFigure key={i} rows={block.rows} />;
+        const trimmed = block.text;
         if (!trimmed) return <div key={i} style={{ height: 8 }} />;
         if (trimmed.startsWith("### ")) return <div key={i} style={{ fontWeight: 700, fontSize: 13, color: C.accent, marginTop: 12, marginBottom: 4 }}>{trimmed.slice(4)}</div>;
-        if (trimmed.startsWith("| ") && trimmed.endsWith("|")) {
-          const cells = trimmed.split("|").filter(Boolean).map(c => c.trim());
-          if (cells.every(c => /^[-:]+$/.test(c))) return null; // separator row
-          return (
-            <div key={i} style={{ display: "flex", gap: 4, padding: "3px 0", borderBottom: `1px solid ${C.border}` }}>
-              {cells.map((c, j) => <span key={j} style={{ flex: 1, fontSize: 11, color: i === 0 ? C.text3 : C.text }}>{c}</span>)}
-            </div>
-          );
-        }
         if (trimmed.startsWith("- **")) {
           const m = trimmed.match(/^- \*\*(.+?)\*\*[：:]?\s*(.*)$/);
           if (m) return <div key={i} style={{ paddingLeft: 12, marginBottom: 4 }}><span style={{ fontWeight: 700, color: C.blue }}>{m[1]}</span>{m[2] && <span style={{ color: C.text2 }}>: {m[2]}</span>}</div>;
@@ -623,9 +657,10 @@ function App() {
   const [dashboardData, setDashboardData] = useState(null);
   const [todayProblem, setTodayProblem] = useState(null);
   const [todayTopicCtx, setTodayTopicCtx] = useState(null);
-  const [pageViewStep, setPageViewStep] = useState("view"); // "view" | "mistakes"
+  const [pageViewStep, setPageViewStep] = useState("view"); // "view" | "mistakes" | "review"
   const [pvMistakes, setPvMistakes] = useState({});
   const [pvTime, setPvTime] = useState("");
+  const [hintOpen, setHintOpen] = useState(false);
 
   // Topics state
   const [topics, setTopics] = useState([]);
@@ -637,6 +672,7 @@ function App() {
   // Settings
   const [apiTokenInput, setApiTokenInput] = useState("");
   const [apiUrlInput, setApiUrlInput] = useState("");
+  const [scheduleCategories, setScheduleCategories] = useState([]);
 
   // ── Init ──
   useEffect(() => {
@@ -693,6 +729,13 @@ function App() {
             const dbData = await apiFetch(`${apiBase(savedUrl)}/api/komekome/dashboard`, savedToken);
             if (dbData && dbData.categories) {
               setDashboardData(dbData); save("kk3-dashboard", dbData);
+            }
+          } catch {}
+          // Fetch schedule
+          try {
+            const schData = await apiFetch(`${apiBase(savedUrl)}/api/komekome/schedule`, savedToken);
+            if (schData && Array.isArray(schData.scope_categories)) {
+              setScheduleCategories(schData.scope_categories);
             }
           } catch {}
           setSyncStatus("synced"); setSyncMsg("OK");
@@ -778,6 +821,7 @@ function App() {
   const resetPageView = useCallback(() => {
     setTodayProblem(null); setTodayTopicCtx(null);
     setPageViewStep("view"); setPvMistakes({}); setPvTime("");
+    setHintOpen(false);
   }, []);
 
   const submitPageViewAttempt = useCallback(async (result) => {
@@ -800,8 +844,12 @@ function App() {
       try { await apiFetch(`${apiBase(url)}/api/komekome/attempts`, token, { method: "POST", body: JSON.stringify([attempt]) }); }
       catch {}
     }
-    resetPageView();
-    setView("today");
+    if (result === "×") {
+      setPageViewStep("review");
+    } else {
+      resetPageView();
+      setView("today");
+    }
   }, [todayProblem, pvMistakes, pvTime, attempts, resetPageView]);
 
   // ── Loading ──
@@ -849,6 +897,42 @@ function App() {
               {syncMsg && <span style={{ color: C.text3, fontSize: 11 }}>({syncMsg})</span>}
             </div>
             <div style={{ color: C.text3, fontSize: 11, marginTop: 12 }}>問題数: {problemList.length} / 記録数: {attempts.length}</div>
+          </div>
+          {/* Weekly schedule */}
+          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginTop: 12 }}>
+            <div style={{ color: C.text3, fontSize: 11, marginBottom: 8 }}>今週の学習範囲</div>
+            <div style={{ color: C.text3, fontSize: 10, marginBottom: 10 }}>選択したカテゴリから新規問題を出題します</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
+              {DASHBOARD_CATEGORIES.map(cat => (
+                <label key={cat} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", cursor: "pointer" }}>
+                  <input type="checkbox" checked={scheduleCategories.includes(cat)}
+                    onChange={e => {
+                      setScheduleCategories(prev =>
+                        e.target.checked ? [...prev, cat] : prev.filter(c => c !== cat)
+                      );
+                    }}
+                    style={{ accentColor: C.accent, width: 18, height: 18, flexShrink: 0 }} />
+                  <span style={{ color: C.text, fontSize: 13 }}>{cat}</span>
+                </label>
+              ))}
+            </div>
+            <Btn onClick={async () => {
+              const token = load("kk3-api-token", "");
+              const url = load("kk3-api-url", "");
+              if (!token) return;
+              try {
+                await apiFetch(`${apiBase(url)}/api/komekome/schedule`, token, {
+                  method: "PUT",
+                  body: JSON.stringify({
+                    week_start: weekStart(today()),
+                    scope_categories: scheduleCategories,
+                  }),
+                });
+                setSyncMsg("スケジュール保存OK");
+              } catch (e) {
+                setSyncMsg("スケジュール保存失敗: " + e.message);
+              }
+            }} bg={C.accent} color="#fff" style={{ width: "100%", padding: "10px" }}>スケジュール保存</Btn>
           </div>
         </div>
       </div>
@@ -1224,6 +1308,73 @@ function App() {
     const tdTopics = todayData.topics || [];
     // Track which problems have been attempted today
     const todayAttemptIds = new Set(todayAttempts.map(a => a.problem_id));
+    const newTopics = tdTopics.filter(t => t.selection_type === "new");
+    const reviewTopics = tdTopics.filter(t => t.selection_type !== "new");
+    const useSectionGrouping = newTopics.length > 0;
+
+    const renderTopicCard = (topic) => (
+      <div key={topic.topic_id} style={{
+        background: C.surface,
+        border: `1px solid ${C.border}`,
+        borderLeft: topic.weak_focus?.active ? `3px solid ${C.red}` : undefined,
+        borderRadius: 14,
+        padding: "14px 16px",
+      }}>
+        {/* Topic header */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+          <span style={{ color: C.text, fontSize: 14, fontWeight: 700, flex: 1 }}>{topic.topic_name}</span>
+          {topic.selection_type === "carryover" && <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: C.blueDim, color: C.blue, fontWeight: 600 }}>繰越</span>}
+          <ReasonBadge reason={topic.weak_focus?.active ? "弱点集中24h" : topic.reason} />
+          <RankBadge rank={topic.importance} />
+        </div>
+        <div style={{ color: C.text3, fontSize: 10, marginBottom: 10 }}>
+          {topic.category} / 間隔Lv.{topic.interval_index}
+          {topic.weak_focus?.active && topic.weak_focus?.until_at && (
+            <span style={{ color: C.red, fontSize: 10, marginLeft: 8 }}>
+              残り {formatRemain(topic.weak_focus.until_at)}
+            </span>
+          )}
+        </div>
+
+        {/* Problems under this topic */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {(topic.problems || []).map(prob => {
+            const done = todayAttemptIds.has(prob.problem_id);
+            const pa = attempts.filter(a => a.problem_id === prob.problem_id);
+            const lastResult = pa.length > 0 ? pa[0].result : null;
+            return (
+              <button key={prob.problem_id} onClick={() => {
+                setTodayProblem(prob); setTodayTopicCtx(topic);
+                setPageViewStep("view"); setPvMistakes({}); setPvTime("");
+                setHintOpen(false);
+                setView("page-view");
+              }}
+                style={{ background: done ? C.surface2 : C.surface3, border: `1px solid ${done ? C.border : C.border}`, borderRadius: 10, padding: "10px 14px", cursor: "pointer", fontFamily: font, textAlign: "left", display: "flex", alignItems: "center", gap: 10, opacity: done ? 0.7 : 1 }}>
+                <div style={{ minWidth: 30, textAlign: "center" }}>
+                  {done ? (
+                    <span style={{ color: lastResult === "○" ? C.green : C.red, fontSize: 16, fontWeight: 700 }}>{lastResult}</span>
+                  ) : (
+                    <span style={{ color: C.text3, fontSize: 11 }}>{prob.number?.replace(/^問題\s*/, "") || "-"}</span>
+                  )}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: C.text, fontSize: 12, fontWeight: 500, lineHeight: 1.4 }}>{prob.title || `${BOOK_SHORT[prob.book] || prob.book} ${prob.number}`}</div>
+                  <div style={{ display: "flex", gap: 6, marginTop: 3, alignItems: "center" }}>
+                    <span style={{ color: C.accent, fontSize: 10 }}>{BOOK_SHORT[prob.book] || prob.book}</span>
+                    <RankBadge rank={prob.rank} />
+                    {prob.type && <span style={{ color: C.text3, fontSize: 9 }}>{prob.type}</span>}
+                    {prob.time_min > 0 && <span style={{ color: C.text3, fontSize: 9 }}>{prob.time_min}分</span>}
+                  </div>
+                </div>
+                {prob.page_image_key && (
+                  <span style={{ color: C.blue, fontSize: 10, flexShrink: 0 }}>📄</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
 
     return (
       <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
@@ -1237,69 +1388,36 @@ function App() {
           {tdTopics.length === 0 ? (
             <div style={{ color: C.text3, textAlign: "center", padding: 40, fontSize: 14 }}>今日の問題はありません</div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-              {tdTopics.map(topic => (
-                <div key={topic.topic_id} style={{
-                  background: C.surface,
-                  border: `1px solid ${C.border}`,
-                  borderLeft: topic.weak_focus?.active ? `3px solid ${C.red}` : undefined,
-                  borderRadius: 14,
-                  padding: "14px 16px",
-                }}>
-                  {/* Topic header */}
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
-                    <span style={{ color: C.text, fontSize: 14, fontWeight: 700, flex: 1 }}>{topic.topic_name}</span>
-                    <ReasonBadge reason={topic.weak_focus?.active ? "弱点集中24h" : topic.reason} />
-                    <RankBadge rank={topic.importance} />
+            useSectionGrouping ? (
+              <>
+                {newTopics.length > 0 && (
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                      <span style={{ color: C.accent, fontSize: 13, fontWeight: 700 }}>今週の新規</span>
+                      <span style={{ background: C.accentDim, color: C.accent, fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 10 }}>{newTopics.reduce((s, t) => s + (t.problems?.length || 0), 0)}問</span>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                      {newTopics.map(topic => renderTopicCard(topic))}
+                    </div>
                   </div>
-                  <div style={{ color: C.text3, fontSize: 10, marginBottom: 10 }}>
-                    {topic.category} / 間隔Lv.{topic.interval_index}
-                    {topic.weak_focus?.active && topic.weak_focus?.until_at && (
-                      <span style={{ color: C.red, fontSize: 10, marginLeft: 8 }}>
-                        残り {formatRemain(topic.weak_focus.until_at)}
-                      </span>
-                    )}
+                )}
+                {reviewTopics.length > 0 && (
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                      <span style={{ color: C.blue, fontSize: 13, fontWeight: 700 }}>復習</span>
+                      <span style={{ background: C.blueDim, color: C.blue, fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 10 }}>{reviewTopics.reduce((s, t) => s + (t.problems?.length || 0), 0)}問</span>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                      {reviewTopics.map(topic => renderTopicCard(topic))}
+                    </div>
                   </div>
-
-                  {/* Problems under this topic */}
-                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    {(topic.problems || []).map(prob => {
-                      const done = todayAttemptIds.has(prob.problem_id);
-                      const pa = attempts.filter(a => a.problem_id === prob.problem_id);
-                      const lastResult = pa.length > 0 ? pa[0].result : null;
-                      return (
-                        <button key={prob.problem_id} onClick={() => {
-                          setTodayProblem(prob); setTodayTopicCtx(topic);
-                          setPageViewStep("view"); setPvMistakes({}); setPvTime("");
-                          setView("page-view");
-                        }}
-                          style={{ background: done ? C.surface2 : C.surface3, border: `1px solid ${done ? C.border : C.border}`, borderRadius: 10, padding: "10px 14px", cursor: "pointer", fontFamily: font, textAlign: "left", display: "flex", alignItems: "center", gap: 10, opacity: done ? 0.7 : 1 }}>
-                          <div style={{ minWidth: 30, textAlign: "center" }}>
-                            {done ? (
-                              <span style={{ color: lastResult === "○" ? C.green : C.red, fontSize: 16, fontWeight: 700 }}>{lastResult}</span>
-                            ) : (
-                              <span style={{ color: C.text3, fontSize: 11 }}>{prob.number?.replace(/^問題\s*/, "") || "-"}</span>
-                            )}
-                          </div>
-                          <div style={{ flex: 1 }}>
-                            <div style={{ color: C.text, fontSize: 12, fontWeight: 500, lineHeight: 1.4 }}>{prob.title || `${BOOK_SHORT[prob.book] || prob.book} ${prob.number}`}</div>
-                            <div style={{ display: "flex", gap: 6, marginTop: 3, alignItems: "center" }}>
-                              <span style={{ color: C.accent, fontSize: 10 }}>{BOOK_SHORT[prob.book] || prob.book}</span>
-                              <RankBadge rank={prob.rank} />
-                              {prob.type && <span style={{ color: C.text3, fontSize: 9 }}>{prob.type}</span>}
-                              {prob.time_min > 0 && <span style={{ color: C.text3, fontSize: 9 }}>{prob.time_min}分</span>}
-                            </div>
-                          </div>
-                          {prob.page_image_key && (
-                            <span style={{ color: C.blue, fontSize: 10, flexShrink: 0 }}>📄</span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
+                )}
+              </>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                {tdTopics.map(topic => renderTopicCard(topic))}
+              </div>
+            )
           )}
         </div>
       </div>
@@ -1313,7 +1431,91 @@ function App() {
       ? `${apiBase(apiUrl)}/api/komekome/page-image/${todayProblem.page_image_key}`
       : null;
 
-    // Step: "view" = show image + ○/×, "mistakes" = show mistake selection for ×
+    // Step: "view" = show image + ○/×, "mistakes" = show mistake selection for ×, "review" = review after ×
+    if (pageViewStep === "review") {
+      // Find the topic data for this problem
+      const topicId = todayTopicCtx?.topic_id;
+      const topicData = topicId ? topics.find(t => t.topic_id === topicId) : null;
+      const reviewSections = [
+        { key: "mistakes", title: "間違えやすいポイント", icon: "!", color: C.red },
+        { key: "steps", title: "計算手順", icon: "C", color: C.accent },
+        { key: "judgment", title: "判断ポイント", icon: "J", color: C.green },
+      ];
+      // Resolve related topics
+      const relatedTopics = (topicData?.related || []).filter(r => r).map(name => {
+        const match = topics.find(t => t.topic === name || t.topic_id.endsWith("/" + name) || t.topic_id.includes(name));
+        return match ? { name, topic: match } : { name, topic: null };
+      });
+
+      return (
+        <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", fontFamily: font }}>
+          <div style={{ flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch", padding: "20px 16px" }}>
+            <div style={{ maxWidth: 480, margin: "0 auto" }}>
+              <div style={{ color: C.red, fontSize: 18, fontWeight: 700, textAlign: "center", marginBottom: 4 }}>× 不正解</div>
+              <div style={{ color: C.text2, fontSize: 13, textAlign: "center", marginBottom: 16 }}>{todayProblem.title || `${BOOK_SHORT[todayProblem.book]} ${todayProblem.number}`}</div>
+
+              {topicData ? (
+                <>
+                  {/* Topic header */}
+                  <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 16px", marginBottom: 12 }}>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4, flexWrap: "wrap" }}>
+                      <span style={{ color: C.accent, fontSize: 11, fontWeight: 600 }}>{topicData.category}</span>
+                      <RankBadge rank={topicData.importance} />
+                    </div>
+                    <div style={{ color: C.text, fontSize: 15, fontWeight: 700, lineHeight: 1.4 }}>{topicData.display_name || topicData.topic}</div>
+                  </div>
+
+                  {/* Review sections */}
+                  {reviewSections.map(sec => {
+                    const content = topicData[sec.key];
+                    if (!content) return null;
+                    return (
+                      <div key={sec.key} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 16px", marginBottom: 12 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                          <span style={{ width: 22, height: 22, borderRadius: 6, background: `${sec.color}20`, color: sec.color, fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>{sec.icon}</span>
+                          <span style={{ color: C.text, fontSize: 13, fontWeight: 700 }}>{sec.title}</span>
+                        </div>
+                        <SectionContent text={content} />
+                      </div>
+                    );
+                  })}
+
+                  {/* Related topics */}
+                  {relatedTopics.length > 0 && (
+                    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 16px", marginBottom: 12 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                        <span style={{ width: 22, height: 22, borderRadius: 6, background: `${C.blue}20`, color: C.blue, fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>R</span>
+                        <span style={{ color: C.text, fontSize: 13, fontWeight: 700 }}>関連論点</span>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {relatedTopics.map((rt, i) => (
+                          <button key={i} onClick={() => { if (rt.topic) { setTopicItem(rt.topic); setTopicCat(rt.topic.category); resetPageView(); setView("topics-detail"); } }}
+                            disabled={!rt.topic}
+                            style={{ background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 14px", cursor: rt.topic ? "pointer" : "default", fontFamily: font, textAlign: "left", display: "flex", alignItems: "center", gap: 8, opacity: rt.topic ? 1 : 0.5 }}>
+                            <span style={{ color: C.blue, fontSize: 12 }}>→</span>
+                            <span style={{ color: C.text, fontSize: 12 }}>{rt.topic?.display_name || rt.topic?.topic || rt.name}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "24px 16px", marginBottom: 12, textAlign: "center" }}>
+                  <div style={{ color: C.text3, fontSize: 13 }}>この問題に対応する論点データがありません</div>
+                </div>
+              )}
+            </div>
+          </div>
+          <div style={{ padding: "10px 16px 14px", flexShrink: 0, background: C.bg, borderTop: `1px solid ${C.border}` }}>
+            <div style={{ maxWidth: 480, margin: "0 auto" }}>
+              <Btn onClick={() => { resetPageView(); setView("today"); }} bg={C.accent} color="#fff" style={{ width: "100%", padding: "16px", fontSize: 16 }}>次の問題へ</Btn>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     if (pageViewStep === "mistakes") {
       return (
         <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", fontFamily: font }}>
@@ -1386,6 +1588,34 @@ function App() {
                 <div style={{ color: C.text3, fontSize: 11, marginTop: 4 }}>p.{todayProblem.page || "-"}</div>
               </div>
             )}
+            {/* Hint button */}
+            {(() => {
+              const topicId = todayTopicCtx?.topic_id;
+              const topicData = topicId ? topics.find(t => t.topic_id === topicId) : null;
+              if (!topicData) return null;
+              const isTheory = (todayProblem.type || "").includes("理論");
+              const hintContent = isTheory
+                ? (topicData.statutes || topicData.conditions?.join("\n") || "")
+                : (topicData.steps || "");
+              if (!hintContent) return null;
+              return (
+                <div style={{ marginBottom: 12 }}>
+                  <button onClick={() => setHintOpen(!hintOpen)}
+                    style={{ width: "100%", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 16px", cursor: "pointer", fontFamily: font, textAlign: "left", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <span style={{ color: C.purple, fontSize: 13, fontWeight: 600 }}>ヒントを見る</span>
+                    <span style={{ color: C.text3, fontSize: 12 }}>{hintOpen ? "▲" : "▼"}</span>
+                  </button>
+                  {hintOpen && (
+                    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 14px 14px", padding: "12px 16px" }}>
+                      <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, marginBottom: 8 }}>
+                        {isTheory ? "関連条文" : "計算手順"}
+                      </div>
+                      <SectionContent text={hintContent} />
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         </div>
 

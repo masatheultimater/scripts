@@ -50,6 +50,11 @@ MAX_CARRYOVER = 15  # 繰越問題の上限
 CARRYOVER_EXPIRY_DAYS = 2  # 繰越の有効日数
 LOG_RETENTION_DAYS = 30
 
+# スケジュール連動出題
+NEW_REVIEW_RATIO = 0.5  # 新規:復習 の比率
+MIN_NEW_PROBLEMS = 5  # 最低新規問題数
+MIN_REVIEW_PROBLEMS = 5  # 最低復習問題数
+
 
 class VaultPaths:
     """Vaultのディレクトリ構造を一元管理するクラス。"""
@@ -64,6 +69,7 @@ class VaultPaths:
         self.analysis = self.root / "40_分析"
         self.export = self.root / "50_エクスポート"
         self.index_json = self.sources / "_index.json"
+        self.weekly_schedule = self.export / "weekly_schedule.json"
 
     def ensure_dirs(self):
         """全必須ディレクトリを作成する。"""
@@ -359,6 +365,7 @@ def extract_body_sections(body: str) -> dict:
         "judgment": "",
         "mistakes": "",
         "mistake_items": [],
+        "statutes": "",
     }
 
     # H1 見出し
@@ -386,6 +393,7 @@ def extract_body_sections(body: str) -> dict:
     result["steps"] = _extract_section("計算手順")
     result["judgment"] = _extract_section("判断ポイント")
     result["mistakes"] = _extract_section("間違えやすいポイント")
+    result["statutes"] = _extract_section("関連条文")
 
     # 間違えやすいポイントを個別項目に分解（チェックボックス用）
     if result["mistakes"]:

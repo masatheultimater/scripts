@@ -1,4 +1,4 @@
-const CACHE_VERSION = "20260221121610";
+const CACHE_VERSION = "20260221134959";
 const STATIC_CACHE_NAME = `komekome-static-v2-${CACHE_VERSION}`;
 const RUNTIME_CACHE_NAME = `komekome-runtime-v2-${CACHE_VERSION}`;
 const CACHE_PREFIXES = ["komekome-static-v2-", "komekome-runtime-v2-"];
@@ -20,20 +20,13 @@ self.addEventListener("install", (event) => {
   self.skipWaiting();
 });
 
-// Activate: clean old caches
+// Activate: clean ALL old caches (aggressive - ensures old SW caches are removed)
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(
         keys
-          .filter((key) =>
-            CACHE_PREFIXES.some(
-              (prefix) =>
-                key.startsWith(prefix) &&
-                key !== STATIC_CACHE_NAME &&
-                key !== RUNTIME_CACHE_NAME
-            )
-          )
+          .filter((key) => key !== STATIC_CACHE_NAME && key !== RUNTIME_CACHE_NAME)
           .map((key) => caches.delete(key))
       )
     )

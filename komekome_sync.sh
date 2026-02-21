@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # ============================================================
 # コメコメ Cloudflare Workers 同期スクリプト
-# 使い方: bash komekome_sync.sh push|pull|push-topics|push-today|push-dashboard|status
+# 使い方: bash komekome_sync.sh push|pull|push-topics|push-today|push-dashboard|push-schedule|pull-schedule|status
 #   push        - komekome_import.json を Workers API にアップロード
 #   pull        - Workers API から未処理結果をダウンロードし writeback 実行
 #   push-topics - 充実済み論点ノートを Workers API にアップロード
 #   push-today  - today_problems.json を Workers API にアップロード
 #   push-dashboard - dashboard_data.json を Workers API にアップロード
+#   push-schedule - weekly_schedule.json を Workers API にアップロード
+#   pull-schedule - Workers API から weekly_schedule.json をダウンロード
 #   status      - API のステータスを表示
 # ============================================================
 
@@ -45,7 +47,7 @@ fi
 export PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
 
 usage() {
-  echo "使い方: bash komekome_sync.sh push|pull|push-topics|push-today|push-dashboard|status"
+  echo "使い方: bash komekome_sync.sh push|pull|push-topics|push-today|push-dashboard|push-schedule|pull-schedule|status"
 }
 
 # ── push: problems_master.json → Workers API ──
@@ -199,6 +201,9 @@ PYEOF
     HOUJINZEI_LOCK_HELD=1 bash "$SCRIPTS_DIR/komekome_writeback.sh" "$results_file"
     echo "pull 完了: writeback 実行済み ($now)"
   fi
+
+  # Pull schedule
+  do_pull_schedule || true
 }
 
 # ── status: API ステータス表示 ──
@@ -306,6 +311,8 @@ for path in sorted(notes_root.rglob("*.md")):
         "judgment": sections.get("judgment", ""),
         "mistakes": sections.get("mistakes", ""),
         "mistake_items": sections.get("mistake_items", []),
+        "related": fm.get("related", []),
+        "statutes": sections.get("statutes", ""),
     })
 
 data = {
@@ -407,6 +414,59 @@ do_push_dashboard() {
   echo "push-dashboard 完了: dashboard_data.json → Workers API"
 }
 
+# ── push-schedule: weekly_schedule.json → Workers API ──
+do_push_schedule() {
+  local schedule_file="$EXPORT_DIR/weekly_schedule.json"
+  if [[ ! -f "$schedule_file" ]]; then
+    echo "エラー: $schedule_file が見つかりません" >&2
+    return 1
+  fi
+
+  local response
+  response=$(curl -s -w "\n%{http_code}" -X PUT \
+    "${API_URL}/api/komekome/schedule" \
+    -H "Authorization: Bearer ${API_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -H "User-Agent: komekome-sync/1.0" \
+    -d @"$schedule_file")
+
+  local http_code
+  http_code=$(echo "$response" | tail -1)
+  local body
+  body=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" != "200" ]]; then
+    echo "エラー: push-schedule 失敗 (HTTP $http_code): $body" >&2
+    return 1
+  fi
+
+  echo "push-schedule 完了: weekly_schedule.json → Workers API"
+}
+
+# ── pull-schedule: Workers API → weekly_schedule.json ──
+do_pull_schedule() {
+  local schedule_file="$EXPORT_DIR/weekly_schedule.json"
+
+  local response
+  response=$(curl -s -w "\n%{http_code}" \
+    "${API_URL}/api/komekome/schedule" \
+    -H "Authorization: Bearer ${API_TOKEN}" \
+    -H "User-Agent: komekome-sync/1.0")
+
+  local http_code
+  http_code=$(echo "$response" | tail -1)
+  local body
+  body=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" != "200" ]]; then
+    echo "エラー: pull-schedule 失敗 (HTTP $http_code): $body" >&2
+    return 1
+  fi
+
+  echo "$body" > "$schedule_file"
+  echo "pull-schedule 完了: Workers API → weekly_schedule.json"
+}
+
 # ── main ──
 if [[ $# -lt 1 ]]; then
   usage
@@ -419,6 +479,8 @@ case "$1" in
   push-topics) do_push_topics ;;
   push-today)  do_push_today ;;
   push-dashboard) do_push_dashboard ;;
+  push-schedule) do_push_schedule ;;
+  pull-schedule) do_pull_schedule ;;
   status)      do_status ;;
   *)
     echo "エラー: 不明なコマンド: $1" >&2
