@@ -5,3 +5,7 @@ pages_build_output_dir = "public"
 [[kv_namespaces]]
 binding = "KOMEKOME_STORE"
 id = "076b69f2f4d9454faebb88bb93cf63bd"
+
+[[r2_buckets]]
+binding = "KOMEKOME_PAGES"
+bucket_name = "komekome-pages"

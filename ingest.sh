@@ -14,16 +14,28 @@ INDEX_FILE="$VAULT/01_sources/_index.json"
 EXTRACTED_DIR="$VAULT/02_extracted"
 
 # --- 引数チェック ---
-if [ $# -lt 2 ]; then
-  echo "使い方: bash ingest.sh <PDFパス> <教材タイプ>"
+RESUME=false
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    --resume) RESUME=true ;;
+    *) args+=("$arg") ;;
+  esac
+done
+
+if [ ${#args[@]} -lt 2 ]; then
+  echo "使い方: bash ingest.sh <PDFパス> <教材タイプ> [--resume]"
   echo ""
   echo "教材タイプ:"
   echo "  計算テキスト / 計算問題集 / 理論テキスト / 確認テスト / 模試 / 法令"
+  echo ""
+  echo "オプション:"
+  echo "  --resume  STAGE 1のGemini出力が既にある場合、パースから再開"
   exit 1
 fi
 
-PDF_PATH="$(realpath "$1")"
-SOURCE_TYPE="$2"
+PDF_PATH="$(realpath "${args[0]}")"
+SOURCE_TYPE="${args[1]}"
 
 # --- PDFの存在チェック ---
 if [ ! -f "$PDF_PATH" ]; then
@@ -92,19 +104,43 @@ PDF_TEXT_SIZE=$(wc -c < "$PDF_TEXT_FILE")
 echo "   テキストサイズ: ${PDF_TEXT_SIZE} bytes"
 
 # --- STAGE 1b: Gemini CLI で構造分析（抽出テキストを渡す） ---
-# 小さいPDF (<500KB text) は@構文でバイナリ直接渡し、大きいPDFはテキスト渡し
-# 定数: PDF_TEXT_SIZE_THRESHOLD=500000, GEMINI_TIMEOUT_SMALL=600, GEMINI_TIMEOUT_LARGE=1200
+# 小さいPDF (<500KB text) は@構文でテキスト渡し、大きいPDFもテキスト渡し（timeout延長）
 PDF_SIZE_THRESHOLD=500000
-TIMEOUT_SMALL=600
-TIMEOUT_LARGE=1200
-if [ "$PDF_TEXT_SIZE" -lt "$PDF_SIZE_THRESHOLD" ]; then
-  echo "   方式: @構文（PDF直接, timeout=${TIMEOUT_SMALL}s）"
-  PDF_RELPATH="$(realpath --relative-to="$VAULT" "$PDF_PATH")"
-  (cd "$VAULT" && timeout "$TIMEOUT_SMALL" gemini -p "$(printf '%s\n\n@%s' "$PROMPT_CONTENT" "$PDF_RELPATH")" --yolo -o text) > "$GEMINI_RAW" 2>&1
-else
-  echo "   方式: テキスト渡し（大容量PDF向け, timeout=${TIMEOUT_LARGE}s）"
-  PDF_TEXT_RELPATH="$(realpath --relative-to="$VAULT" "$PDF_TEXT_FILE")"
-  (cd "$VAULT" && timeout "$TIMEOUT_LARGE" gemini -p "$(printf '%s\n\n以下は教材PDFから抽出したテキストです:\n\n@%s' "$PROMPT_CONTENT" "$PDF_TEXT_RELPATH")" --yolo -o text) > "$GEMINI_RAW" 2>&1
+TIMEOUT_SMALL=900
+TIMEOUT_LARGE=1800
+
+# --resume: 既存のGemini出力にJSON有り → STAGE 1bスキップ
+SKIP_GEMINI=false
+if $RESUME && [ -f "$GEMINI_RAW" ]; then
+  if python3 -c "
+import re, json, sys
+with open(sys.argv[1]) as f: raw = f.read()
+m = re.search(r'\`\`\`json\s*\n(.*?)\n\`\`\`', raw, re.DOTALL)
+if m:
+    data = json.loads(m.group(1))
+    topics = data.get('topics', [])
+    if len(topics) > 0: sys.exit(0)
+sys.exit(1)
+" "$GEMINI_RAW" 2>/dev/null; then
+    echo "   ⏩ --resume: 既存のGemini出力を再利用（JSONあり）"
+    SKIP_GEMINI=true
+  else
+    echo "   ⚠️  既存のGemini出力にJSON未発見、再実行します"
+  fi
+fi
+
+if ! $SKIP_GEMINI; then
+  # 古い出力を削除（noclobber対策）
+  rm -f "$GEMINI_RAW"
+  if [ "$PDF_TEXT_SIZE" -lt "$PDF_SIZE_THRESHOLD" ]; then
+    echo "   方式: @構文（テキスト渡し, timeout=${TIMEOUT_SMALL}s）"
+    PDF_TEXT_RELPATH="$(realpath --relative-to="$VAULT" "$PDF_TEXT_FILE")"
+    (cd "$VAULT" && timeout "$TIMEOUT_SMALL" gemini -p "$(printf '%s\n\n以下は「%s（資格の大原）」のテキスト抽出結果です:\n\n@%s' "$PROMPT_CONTENT" "$PDF_FILENAME" "$PDF_TEXT_RELPATH")" --yolo -o text) > "$GEMINI_RAW" 2>&1
+  else
+    echo "   方式: テキスト渡し（大容量PDF向け, timeout=${TIMEOUT_LARGE}s）"
+    PDF_TEXT_RELPATH="$(realpath --relative-to="$VAULT" "$PDF_TEXT_FILE")"
+    (cd "$VAULT" && timeout "$TIMEOUT_LARGE" gemini -p "$(printf '%s\n\n以下は「%s」のテキスト抽出結果です:\n\n@%s' "$PROMPT_CONTENT" "$PDF_FILENAME" "$PDF_TEXT_RELPATH")" --yolo -o text) > "$GEMINI_RAW" 2>&1
+  fi
 fi
 
 # Geminiの出力からMarkdownとJSONを分離

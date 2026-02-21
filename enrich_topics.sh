@@ -10,6 +10,8 @@ set -euo pipefail
 VAULT="${VAULT:-$HOME/vault/houjinzei}"
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
+# claude -p のネストセッション検出を回避
+unset CLAUDECODE 2>/dev/null || true
 LOG_DIR="$VAULT/logs"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/enrich_topics_${RUN_TS}.log"
@@ -20,6 +22,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 DRY_RUN=false
 LIMIT=0
 SLEEP_SEC=5
+CATEGORIES=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,13 +38,18 @@ while [[ $# -gt 0 ]]; do
       SLEEP_SEC="$2"
       shift 2
       ;;
+    --categories)
+      CATEGORIES="$2"
+      shift 2
+      ;;
     -h|--help)
-      echo "使い方: bash enrich_topics.sh [--dry-run] [--limit N] [--sleep-sec S]"
+      echo "使い方: bash enrich_topics.sh [--dry-run] [--limit N] [--sleep-sec S] [--categories CAT1,CAT2,...]"
       echo ""
       echo "オプション:"
-      echo "  --dry-run    対象ノートの一覧を表示するのみ（実行しない）"
-      echo "  --limit N    処理する最大件数（0 = 無制限）"
-      echo "  --sleep-sec S  各ノート処理後のスリープ秒数（デフォルト: 5）"
+      echo "  --dry-run        対象ノートの一覧を表示するのみ（実行しない）"
+      echo "  --limit N        処理する最大件数（0 = 無制限）"
+      echo "  --sleep-sec S    各ノート処理後のスリープ秒数（デフォルト: 5）"
+      echo "  --categories C   カンマ区切りのカテゴリフィルタ（並列実行用）"
       exit 0
       ;;
     *)
@@ -51,10 +59,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-export VAULT DRY_RUN LIMIT SLEEP_SEC
+export VAULT DRY_RUN LIMIT SLEEP_SEC CATEGORIES
 
 # リファレンスノート（充実済み）のbody部分を取得
-REFERENCE_NOTE="$VAULT/10_論点/損金算入/減価償却_普通.md"
+REFERENCE_NOTE="$VAULT/10_論点/損金算入/損金算入_寄附金_損金算入限度額.md"
 if [[ ! -f "$REFERENCE_NOTE" ]]; then
   echo "警告: リファレンスノートが見つかりません: $REFERENCE_NOTE" >&2
 fi
@@ -85,10 +93,13 @@ from lib.houjinzei_common import (
 DRY_RUN = os.environ["DRY_RUN"] == "true"
 LIMIT = int(os.environ["LIMIT"])
 SLEEP_SEC = int(os.environ["SLEEP_SEC"])
+CATEGORIES_FILTER = set(
+    c.strip() for c in os.environ.get("CATEGORIES", "").split(",") if c.strip()
+)
 
 vp = VaultPaths(os.environ["VAULT"])
 TOPIC_DIR = vp.topics
-REFERENCE_NOTE = vp.topics / "損金算入" / "減価償却_普通.md"
+REFERENCE_NOTE = vp.topics / "損金算入" / "損金算入_寄附金_損金算入限度額.md"
 
 PLACEHOLDER_PATTERNS = [
     re.compile(r"[-*]\s*（.*?記入.*?）"),
@@ -164,12 +175,16 @@ def build_prompt(fm: dict, body: str, reference_body: str) -> str:
 
     ref_section = ""
     if reference_body:
+        # 参照ノートが長すぎるとタイムアウトするため、先頭800文字に制限
+        trimmed = reference_body[:800]
+        if len(reference_body) > 800:
+            trimmed += "\n...(以下省略)"
         ref_section = f"""
-## リファレンス（充実済みノートの例）
-以下は「減価償却_普通」の論点ノートの本文例です。このレベルの充実度と書式を目指してください。
+## リファレンス（書式例）
+以下の書式と充実度を目指してください。
 
 ```markdown
-{reference_body}
+{trimmed}
 ```
 """
 
@@ -198,32 +213,75 @@ def build_prompt(fm: dict, body: str, reference_body: str) -> str:
 6. Markdown形式で出力してください"""
 
 
+MAX_RETRIES = 3
+RETRY_BACKOFF = [10, 30, 60]  # seconds
+
+# Progress file for resume capability (per-category for parallel runs)
+_progress_suffix = ""
+if CATEGORIES_FILTER:
+    _progress_suffix = "_" + "_".join(sorted(CATEGORIES_FILTER))
+PROGRESS_FILE = Path(os.environ["VAULT"]) / "logs" / f"enrich_progress{_progress_suffix}.json"
+
+
+def load_progress() -> set:
+    if PROGRESS_FILE.exists():
+        try:
+            data = json.loads(PROGRESS_FILE.read_text())
+            return set(data.get("completed", []))
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return set()
+
+
+def save_progress(completed: set):
+    PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PROGRESS_FILE.write_text(json.dumps(
+        {"completed": sorted(completed), "updated": time.strftime("%Y-%m-%d %H:%M:%S")},
+        ensure_ascii=False, indent=2
+    ))
+
+
 def enrich_note(md_path: Path, fm: dict, body: str, reference_body: str) -> bool:
     prompt = build_prompt(fm, body, reference_body)
 
-    try:
-        result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text"],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except FileNotFoundError:
-        eprint("エラー: claude コマンドが見つかりません")
-        return False
-    except subprocess.TimeoutExpired:
-        eprint(f"タイムアウト: {md_path}")
-        return False
+    for attempt in range(MAX_RETRIES):
+        try:
+            result = subprocess.run(
+                ["claude", "-p", prompt, "--output-format", "text", "--model", "claude-sonnet-4-5"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except FileNotFoundError:
+            eprint("エラー: claude コマンドが見つかりません")
+            return False
+        except subprocess.TimeoutExpired:
+            eprint(f"タイムアウト (試行 {attempt+1}/{MAX_RETRIES}): {md_path}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF[attempt])
+                continue
+            return False
 
-    if result.returncode != 0:
-        eprint(f"claude -p 失敗 (code {result.returncode}): {md_path}")
-        if result.stderr:
-            eprint(result.stderr[:500])
-        return False
+        if result.returncode != 0:
+            eprint(f"claude -p 失敗 (code {result.returncode}, 試行 {attempt+1}/{MAX_RETRIES}): {md_path}")
+            if result.stderr:
+                eprint(result.stderr[:500])
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF[attempt])
+                continue
+            return False
 
-    new_body = result.stdout.strip()
-    if not new_body or len(new_body) < 50:
-        eprint(f"生成結果が短すぎます: {md_path}")
+        new_body = result.stdout.strip()
+        if not new_body or len(new_body) < 50:
+            eprint(f"生成結果が短すぎます (試行 {attempt+1}/{MAX_RETRIES}): {md_path}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF[attempt])
+                continue
+            return False
+
+        # Success - break out of retry loop
+        break
+    else:
         return False
 
     # frontmatter を保持して body だけ差し替え
@@ -258,7 +316,13 @@ if not TOPIC_DIR.exists():
     sys.exit(1)
 
 reference_body = get_reference_body()
+completed = load_progress()
+if completed:
+    print(f"レジューム: {len(completed)}件完了済みをスキップ")
+
 targets = []
+
+RANK_ORDER = {"A": 0, "B": 1, "C": 2, "": 3}
 
 for md_path in sorted(TOPIC_DIR.rglob("*.md")):
     if md_path.name in ("README.md", "CLAUDE.md"):
@@ -268,14 +332,27 @@ for md_path in sorted(TOPIC_DIR.rglob("*.md")):
         continue
     if not is_empty_template(body):
         continue
-    targets.append((md_path, fm, body))
+    # Category filter (for parallel runs)
+    if CATEGORIES_FILTER:
+        cat = fm.get("category", "")
+        if cat not in CATEGORIES_FILTER:
+            continue
+    # Skip already completed (resume)
+    topic_key = str(md_path.relative_to(TOPIC_DIR))
+    if topic_key in completed:
+        continue
+    targets.append((md_path, fm, body, topic_key))
 
-print(f"空テンプレートノート: {len(targets)}件")
+# Sort by importance: A first, then B, then C
+targets.sort(key=lambda t: RANK_ORDER.get(t[1].get("importance", ""), 3))
+
+print(f"空テンプレートノート: {len(targets)}件 (A: {sum(1 for t in targets if t[1].get('importance')=='A')}, B: {sum(1 for t in targets if t[1].get('importance')=='B')}, C: {sum(1 for t in targets if t[1].get('importance')=='C')})")
 
 if DRY_RUN:
-    for md_path, fm, _ in targets:
+    for md_path, fm, _, _ in targets:
         topic = fm.get("topic", md_path.stem)
-        print(f"  - {topic}: {md_path}")
+        rank = fm.get("importance", "?")
+        print(f"  [{rank}] {topic}: {md_path}")
     print("")
     print("ドライランのため実行しません。")
     sys.exit(0)
@@ -287,13 +364,16 @@ if LIMIT > 0:
 enriched = 0
 failed = 0
 
-for i, (md_path, fm, body) in enumerate(targets):
+for i, (md_path, fm, body, topic_key) in enumerate(targets):
     topic = fm.get("topic", md_path.stem)
-    print(f"[{i+1}/{len(targets)}] {topic}...")
+    rank = fm.get("importance", "?")
+    print(f"[{i+1}/{len(targets)}] [{rank}] {topic}...")
 
     if enrich_note(md_path, fm, body, reference_body):
         enriched += 1
-        print(f"  充実完了")
+        completed.add(topic_key)
+        save_progress(completed)
+        print(f"  充実完了 (累計: {enriched}件)")
     else:
         failed += 1
         print(f"  失敗")
@@ -302,7 +382,7 @@ for i, (md_path, fm, body) in enumerate(targets):
         time.sleep(SLEEP_SEC)
 
 print("")
-print(f"完了: 充実 {enriched}件 / 失敗 {failed}件")
+print(f"完了: 充実 {enriched}件 / 失敗 {failed}件 / 累計完了 {len(completed)}件")
 PY
 
 echo ""

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================
 # コメコメ Cloudflare Workers 同期スクリプト
-# 使い方: bash komekome_sync.sh push|pull|status
-#   push   - komekome_import.json を Workers API にアップロード
-#   pull   - Workers API から未処理結果をダウンロードし writeback 実行
-#   status - API のステータスを表示
+# 使い方: bash komekome_sync.sh push|pull|push-topics|push-today|status
+#   push        - komekome_import.json を Workers API にアップロード
+#   pull        - Workers API から未処理結果をダウンロードし writeback 実行
+#   push-topics - 充実済み論点ノートを Workers API にアップロード
+#   push-today  - today_problems.json を Workers API にアップロード
+#   status      - API のステータスを表示
 # ============================================================
 
 set -euo pipefail
@@ -39,15 +41,17 @@ else
   exit 1
 fi
 
+export PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
+
 usage() {
-  echo "使い方: bash komekome_sync.sh push|pull|status"
+  echo "使い方: bash komekome_sync.sh push|pull|push-topics|push-today|status"
 }
 
-# ── push: import.json → Workers API ──
+# ── push: problems_master.json → Workers API ──
 do_push() {
-  local import_file="$EXPORT_DIR/komekome_import.json"
-  if [[ ! -f "$import_file" ]]; then
-    echo "エラー: $import_file が見つかりません" >&2
+  local master_file="$EXPORT_DIR/problems_master.json"
+  if [[ ! -f "$master_file" ]]; then
+    echo "エラー: $master_file が見つかりません" >&2
     return 1
   fi
 
@@ -56,10 +60,11 @@ do_push() {
 
   local response
   response=$(curl -s -w "\n%{http_code}" -X POST \
-    "${API_URL}/api/komekome/import" \
+    "${API_URL}/api/komekome/problems" \
     -H "Authorization: Bearer ${API_TOKEN}" \
     -H "Content-Type: application/json" \
-    -d @"$import_file")
+    -H "User-Agent: komekome-sync/1.0" \
+    -d @"$master_file")
 
   local http_code
   http_code=$(echo "$response" | tail -1)
@@ -71,7 +76,24 @@ do_push() {
     return 1
   fi
 
-  echo "push 完了: komekome_import.json → Workers API ($now)"
+  echo "push 完了: problems_master.json → Workers API ($now)"
+
+  # 旧 import.json も互換のため push（存在する場合のみ）
+  local import_file="$EXPORT_DIR/komekome_import.json"
+  if [[ -f "$import_file" ]]; then
+    curl -s -X POST \
+      "${API_URL}/api/komekome/import" \
+      -H "Authorization: Bearer ${API_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -H "User-Agent: komekome-sync/1.0" \
+      -d @"$import_file" > /dev/null 2>&1 || true
+  fi
+
+  # today_problems.json も push（存在する場合のみ）
+  local today_file="$EXPORT_DIR/today_problems.json"
+  if [[ -f "$today_file" ]]; then
+    do_push_today || true
+  fi
 }
 
 # ── pull: Workers API → results + writeback ──
@@ -219,6 +241,142 @@ print(f'  総件数: {total}')
 "
 }
 
+# ── push-topics: 充実済み論点ノート → Workers API ──
+do_push_topics() {
+  local topics_file="$EXPORT_DIR/topics_data.json"
+
+  python3 - "$VAULT" "$topics_file" <<'PYEOF'
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+from lib.houjinzei_common import read_frontmatter, extract_body_sections
+
+vault_root = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+notes_root = vault_root / "10_論点"
+
+topics = []
+categories = set()
+
+for path in sorted(notes_root.rglob("*.md")):
+    if path.name in ("README.md", "CLAUDE.md"):
+        continue
+
+    try:
+        fm, body = read_frontmatter(path)
+    except Exception:
+        continue
+
+    if not fm or not isinstance(fm, dict):
+        continue
+
+    # 空テンプレートはスキップ（本文200文字未満）
+    body_stripped = body.strip()
+    if len(body_stripped) < 200:
+        continue
+
+    sections = extract_body_sections(body)
+    # summaryが空なら充実されていない
+    if not sections.get("summary"):
+        continue
+
+    rel = path.relative_to(notes_root).as_posix()
+    topic_id = rel[:-3] if rel.endswith(".md") else rel
+    category = fm.get("category", "その他")
+    categories.add(category)
+
+    topics.append({
+        "topic_id": topic_id,
+        "topic": fm.get("topic", ""),
+        "category": category,
+        "subcategory": fm.get("subcategory", ""),
+        "type": fm.get("type", []),
+        "importance": fm.get("importance", ""),
+        "keywords": fm.get("keywords", []),
+        "conditions": fm.get("conditions", []),
+        "status": fm.get("status", "未着手"),
+        "kome_total": fm.get("kome_total", 0),
+        "interval_index": fm.get("interval_index", 0),
+        "display_name": sections.get("display_name", ""),
+        "summary": sections.get("summary", ""),
+        "steps": sections.get("steps", ""),
+        "judgment": sections.get("judgment", ""),
+        "mistakes": sections.get("mistakes", ""),
+        "mistake_items": sections.get("mistake_items", []),
+    })
+
+data = {
+    "version": 1,
+    "generated": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+    "total": len(topics),
+    "categories": sorted(categories),
+    "topics": topics,
+}
+
+output_path.parent.mkdir(parents=True, exist_ok=True)
+with open(output_path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False)
+
+print(f"topics_data.json 生成: {len(topics)}件 ({len(categories)}カテゴリ)")
+PYEOF
+
+  if [[ ! -f "$topics_file" ]]; then
+    echo "エラー: topics_data.json の生成に失敗しました" >&2
+    return 1
+  fi
+
+  local response
+  response=$(curl -s -w "\n%{http_code}" -X POST \
+    "${API_URL}/api/komekome/topics" \
+    -H "Authorization: Bearer ${API_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -H "User-Agent: komekome-sync/1.0" \
+    -d @"$topics_file")
+
+  local http_code
+  http_code=$(echo "$response" | tail -1)
+  local body
+  body=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" != "200" ]]; then
+    echo "エラー: push-topics 失敗 (HTTP $http_code): $body" >&2
+    return 1
+  fi
+
+  echo "push-topics 完了: topics_data.json → Workers API"
+}
+
+# ── push-today: today_problems.json → Workers API ──
+do_push_today() {
+  local today_file="$EXPORT_DIR/today_problems.json"
+  if [[ ! -f "$today_file" ]]; then
+    echo "エラー: $today_file が見つかりません" >&2
+    return 1
+  fi
+
+  local response
+  response=$(curl -s -w "\n%{http_code}" -X POST \
+    "${API_URL}/api/komekome/today" \
+    -H "Authorization: Bearer ${API_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -H "User-Agent: komekome-sync/1.0" \
+    -d @"$today_file")
+
+  local http_code
+  http_code=$(echo "$response" | tail -1)
+  local body
+  body=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" != "200" ]]; then
+    echo "エラー: push-today 失敗 (HTTP $http_code): $body" >&2
+    return 1
+  fi
+
+  echo "push-today 完了: today_problems.json → Workers API"
+}
+
 # ── main ──
 if [[ $# -lt 1 ]]; then
   usage
@@ -226,9 +384,11 @@ if [[ $# -lt 1 ]]; then
 fi
 
 case "$1" in
-  push)   do_push ;;
-  pull)   do_pull ;;
-  status) do_status ;;
+  push)        do_push ;;
+  pull)        do_pull ;;
+  push-topics) do_push_topics ;;
+  push-today)  do_push_today ;;
+  status)      do_status ;;
   *)
     echo "エラー: 不明なコマンド: $1" >&2
     usage

@@ -37,8 +37,22 @@ def test_correct_increments_interval():
 
 
 def test_wrong_resets_interval():
-    """不正解でinterval_index → 0"""
+    """不正解でinterval_index: 2段階戻し (2→0)"""
     fm = _make_fm(interval_index=2, status="学習中", stage="学習中")
+    result = process_answer(fm, correct=False, answer_date="2026-02-20")
+    assert result["interval_index"] == 0
+
+
+def test_wrong_soft_reset_from_high():
+    """不正解でinterval_index: 高い値は2段階だけ戻る (3→1)"""
+    fm = _make_fm(interval_index=3, status="復習中", stage="復習中")
+    result = process_answer(fm, correct=False, answer_date="2026-02-20")
+    assert result["interval_index"] == 1
+
+
+def test_wrong_soft_reset_from_1():
+    """不正解でinterval_index: 低い値は0まで (1→0)"""
+    fm = _make_fm(interval_index=1, status="学習中", stage="学習中")
     result = process_answer(fm, correct=False, answer_date="2026-02-20")
     assert result["interval_index"] == 0
 

@@ -297,11 +297,11 @@ def update_topic_note(path: Path, topic_result, session_date: str):
             data["status"] = "卒業"
             data["stage"] = "卒業済"
     else:
-        # 不正解時: ステータス補正、interval_index リセット
+        # 不正解時: ステータス補正、interval_index 2段階戻し
         if current_status == "未着手":
             data["status"] = "学習中"
             data["stage"] = "学習中"
-        current_interval = 0
+        current_interval = max(0, current_interval - 2)
 
     data["interval_index"] = current_interval
 

@@ -2,3 +2,7 @@ lib/__pycache__/
 docs/CLAUDE.md
 __pycache__/
 node_modules/
+.claude/
+.wrangler/
+lib/CLAUDE.md
+problems_master.normalized.json

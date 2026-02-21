@@ -1,19 +1,15 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 
-// ── Storage (localStorage + cookie for token persistence across PWA modes) ──
+// ── Storage ──
 function load(key, fb) {
-  try {
-    const r = localStorage.getItem(key);
-    return r ? JSON.parse(r) : fb;
-  } catch { return fb; }
+  try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fb; } catch { return fb; }
 }
 function save(key, v) {
   try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) { console.error(e); }
 }
 function setCookie(name, value, days = 365) {
-  const d = new Date();
-  d.setTime(d.getTime() + days * 86400000);
+  const d = new Date(); d.setTime(d.getTime() + days * 86400000);
   document.cookie = `${name}=${encodeURIComponent(value)};expires=${d.toUTCString()};path=/;SameSite=Strict;Secure`;
 }
 function getCookie(name) {
@@ -21,1158 +17,987 @@ function getCookie(name) {
   return m ? decodeURIComponent(m[1]) : "";
 }
 
-// ── API Sync ──
-function apiBase(url) {
-  // 空 or 未設定 → 相対パス（同一オリジン、CORS不要）
-  if (!url) return "";
-  return url.replace(/\/+$/, "");
-}
+// ── API ──
+function apiBase(url) { return url ? url.replace(/\/+$/, "") : ""; }
 
 async function apiFetch(url, token, options = {}) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 15000);
   try {
     const res = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        ...(options.headers || {}),
-      },
+      ...options, signal: controller.signal,
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(options.headers || {}) },
     });
-    if (!res.ok) throw new Error(`API error: ${res.status}`);
+    if (!res.ok) throw new Error(`API ${res.status}`);
     return res.json();
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  } finally { clearTimeout(timeoutId); }
 }
 
-function vaultToLocal(q) {
-  const displayName = q.display_name || q.topic_name.replace(/_/g, " ");
-  return {
-    id: `vault_${q.topic_id.replace(/\//g, "_")}`,
-    question: displayName,
-    type: (q.type || [])[0] || "計算",
-    sources: q.sources || [],
-    summary: q.summary || "",
-    steps: q.steps || "",
-    judgment: q.judgment || "",
-    mistakes: q.mistakes || "",
-    mistakeItems: q.mistake_items || [],
-    deck: q.category || "Vault",
-    komeTotal: 0,
-    intervalIndex: q.intervalIndex || 0,
-    nextReview: null,
-    lastReviewed: null,
-    graduated: false,
-    graduatedAt: null,
-    history: [],
-    createdAt: today(),
-    source: "vault",
-    topicId: q.topic_id,
-  };
-}
-
-function buildResultsPayload(problems) {
-  const now = today();
-  const sessionId = `pwa_${Date.now().toString(36)}`;
-  const vaultProblems = problems.filter(p => p.source === "vault" && p.history && p.history.length > 0);
-  const results = vaultProblems
-    .filter(p => {
-      const lastEntry = p.history[p.history.length - 1];
-      return lastEntry && lastEntry.date === now;
-    })
-    .map(p => {
-      const lastEntry = p.history[p.history.length - 1];
-      return {
-        topic_id: p.topicId,
-        kome_count: p.komeTotal || 0,
-        correct: lastEntry.result === "○",
-        time_seconds: lastEntry.time_seconds || 0,
-        mistakes: lastEntry.result !== "○" && lastEntry.memo ? [lastEntry.memo] : [],
-        intervalIndex: p.intervalIndex || 0,
-      };
-    });
-  return { session_date: now, session_id: sessionId, results };
-}
-
-// ── Helpers ──
-function fmtTimer(sec) {
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return `${m}:${s < 10 ? "0" : ""}${s}`;
-}
-
-// ── Constants ──
-const INTERVALS = [3, 7, 14, 28];
-const SESSION_KOME_MAX = 4;
-const REINSERT_GAP = 3;
+// ── Constants & Date Utils ──
 const font = "'Noto Sans JP', -apple-system, sans-serif";
-
 function today() { return new Date().toISOString().split("T")[0]; }
-function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x.toISOString().split("T")[0]; }
-function shuffle(a) { const b = [...a]; for (let i = b.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [b[i], b[j]] = [b[j], b[i]]; } return b; }
+
+function dateAdd(d, n) { const x = new Date(d + "T00:00:00"); x.setDate(x.getDate() + n); return x.toISOString().split("T")[0]; }
+function weekStart(d) { const x = new Date(d + "T00:00:00"); x.setDate(x.getDate() - x.getDay()); return x.toISOString().split("T")[0]; }
+function monthStart(d) { return d.slice(0, 7) + "-01"; }
+function yearStart(d) { return d.slice(0, 4) + "-01-01"; }
 function fmtDate(d) { if (!d) return "-"; const [, m, day] = d.split("-"); return `${+m}/${+day}`; }
 
 const C = {
   bg: "#0f1419", surface: "#1a1f2e", surface2: "#222838", surface3: "#2a3142",
-  border: "#333b4f", kome: "#ff8b3d", komeDim: "rgba(255,139,61,0.12)",
+  border: "#333b4f", accent: "#ff8b3d", accentDim: "rgba(255,139,61,0.12)",
   green: "#3dd68c", greenDim: "rgba(61,214,140,0.12)",
   red: "#ff6b6b", redDim: "rgba(255,107,107,0.12)",
   blue: "#5b9cf6", blueDim: "rgba(91,156,246,0.12)",
-  purple: "#a78bfa",
-  text: "#e8ecf1", text2: "#9ba4b5", text3: "#5f6980", gold: "#ffc847",
+  purple: "#a78bfa", yellow: "#ffc847",
+  text: "#e8ecf1", text2: "#9ba4b5", text3: "#5f6980",
 };
 
-// ── KomeDots (cumulative, never shrinks) ──
-function KomeDots({ count, size = 10, max }) {
-  const display = max ? Math.min(count, max) : count;
-  const overflow = max && count > max;
-  const dots = Math.min(display, 20);
-  return (
-    <div style={{ display: "flex", gap: 3, alignItems: "center", flexWrap: "wrap" }}>
-      {Array.from({ length: dots }).map((_, i) => (
-        <div key={i} style={{
-          width: size, height: size, borderRadius: 2,
-          background: C.kome, border: `1px solid ${C.kome}`,
-          transition: "all 0.3s",
-        }} />
-      ))}
-      {overflow && <span style={{ color: C.kome, fontSize: size - 1, fontWeight: 700 }}>+{count - max}</span>}
-    </div>
-  );
+const MISTAKE_TYPES_COMMON = [
+  { id: "知識不足", label: "知識不足", desc: "規定を知らなかった" },
+  { id: "条件判断ミス", label: "条件判断", desc: "適用条件を間違えた" },
+  { id: "問題読み落とし", label: "読み落とし", desc: "問題文の条件を見落とし" },
+];
+const MISTAKE_TYPES_CALC = [
+  { id: "計算手順ミス", label: "手順ミス", desc: "計算の手順・方法を間違えた" },
+  { id: "ケアレスミス", label: "ケアレス", desc: "単純な計算・転記ミス" },
+  { id: "項目漏れ", label: "項目漏れ", desc: "調整項目を見落とした" },
+];
+const MISTAKE_TYPES_THEORY = [
+  { id: "暗記不足", label: "暗記不足", desc: "条文を再現できなかった" },
+  { id: "論述不備", label: "論述不備", desc: "答案の構成・表現が不十分" },
+];
+
+function getMistakeTypes(problemType) {
+  return problemType === "理論"
+    ? [...MISTAKE_TYPES_COMMON, ...MISTAKE_TYPES_THEORY]
+    : [...MISTAKE_TYPES_COMMON, ...MISTAKE_TYPES_CALC];
 }
 
-// ── Session Kome (cycle progress toward 4) ──
-function SessionDots({ count }) {
-  return (
-    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-      {Array.from({ length: SESSION_KOME_MAX }).map((_, i) => (
-        <div key={i} style={{
-          width: 12, height: 12, borderRadius: 2,
-          background: i < count ? C.kome : C.surface3,
-          border: `1.5px solid ${i < count ? C.kome : C.border}`,
-          transition: "all 0.3s", transform: i < count ? "scale(1.15)" : "scale(1)",
-        }} />
-      ))}
-      <span style={{ color: C.text3, fontSize: 10, marginLeft: 4 }}>今回 {count}/4</span>
-    </div>
-  );
-}
-
-function IntervalBadge({ intervalIndex }) {
-  const labels = ["初回", "3日後", "7日後", "14日後", "28日後", "卒業"];
-  const colors = [C.text3, C.blue, C.blue, C.kome, C.kome, C.green];
-  const idx = Math.min(intervalIndex || 0, 5);
-  return (
-    <span style={{
-      fontSize: 10, padding: "2px 8px", borderRadius: 4,
-      background: `${colors[idx]}20`, color: colors[idx], fontWeight: 600,
-    }}>{labels[idx]}</span>
-  );
-}
-
+// ── Components ──
 function Btn({ onClick, disabled, children, bg, color, style: extra = {} }) {
   const [pressed, setPressed] = useState(false);
   return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      onTouchStart={() => setPressed(true)}
-      onTouchEnd={() => setPressed(false)}
-      onMouseDown={() => setPressed(true)}
-      onMouseUp={() => setPressed(false)}
-      onMouseLeave={() => setPressed(false)}
+    <button onClick={onClick} disabled={disabled}
+      onTouchStart={() => setPressed(true)} onTouchEnd={() => setPressed(false)}
+      onMouseDown={() => setPressed(true)} onMouseUp={() => setPressed(false)} onMouseLeave={() => setPressed(false)}
       style={{
         background: bg, color, border: "none", borderRadius: 10,
         padding: "14px 24px", fontSize: 15, fontWeight: 600,
         cursor: disabled ? "default" : "pointer", fontFamily: font,
-        transition: "all 0.1s",
-        opacity: disabled ? 0.5 : pressed ? 0.7 : 1,
-        transform: pressed ? "scale(0.96)" : "scale(1)",
-        ...extra,
-      }}
-    >{children}</button>
+        transition: "all 0.1s", opacity: disabled ? 0.5 : pressed ? 0.7 : 1,
+        transform: pressed ? "scale(0.96)" : "scale(1)", ...extra,
+      }}>{children}</button>
   );
 }
 
-// ═══════ MAIN APP ═══════
-function KomeKomeV2() {
-  const [problems, setProblems] = useState([]);
-  const [queue, setQueue] = useState([]);
-  const [curIdx, setCurIdx] = useState(0);
-  const [sessionKomeMap, setSessionKomeMap] = useState({});
-  const [showAns, setShowAns] = useState(false);
-  const [stats, setStats] = useState({ correct: 0, wrong: 0, cycleComplete: 0 });
-  const [timerStart, setTimerStart] = useState(null);
-  const [timerElapsed, setTimerElapsed] = useState(0);
-  const [checkedMistakes, setCheckedMistakes] = useState({});
-  const [mistakeMemo, setMistakeMemo] = useState("");
-  const [view, setView] = useState("home");
-  const [sessionActive, setSessionActive] = useState(false);
-  const [feedback, setFeedback] = useState(null);
-  const [loaded, setLoaded] = useState(false);
-  const [newQ, setNewQ] = useState("");
-  const [newA, setNewA] = useState("");
-  const [newDeck, setNewDeck] = useState("デフォルト");
-  const [decks, setDecks] = useState(["デフォルト"]);
-  const [deckFilter, setDeckFilter] = useState("all");
-  const [bulkMode, setBulkMode] = useState(false);
-  const [bulkText, setBulkText] = useState("");
-  const [editId, setEditId] = useState(null);
-  const [editQ, setEditQ] = useState("");
-  const [editA, setEditA] = useState("");
-  const [exportText, setExportText] = useState(null);
-  const [historyView, setHistoryView] = useState(null);
-  const [syncStatus, setSyncStatus] = useState("idle");
-  const [syncMsg, setSyncMsg] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
-  const [apiToken, setApiToken] = useState("");
-  const [apiTokenInput, setApiTokenInput] = useState("");
-  const [apiUrl, setApiUrl] = useState("");
-  const [apiUrlInput, setApiUrlInput] = useState("");
-  const fbTimer = useRef(null);
+function RankBadge({ rank }) {
+  const colors = { A: C.green, B: C.blue, C: C.purple };
+  const c = colors[rank] || C.text3;
+  return rank ? (
+    <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 4, background: `${c}20`, color: c, fontWeight: 700 }}>{rank}</span>
+  ) : null;
+}
 
-  // ── API sync: fetch import on load, merge vault questions ──
-  const syncFromAPI = useCallback(async (currentProblems, token, url) => {
-    if (!token) return currentProblems;
-    setSyncStatus("syncing");
-    try {
-      const importData = await apiFetch(`${apiBase(url)}/api/komekome/import`, token);
-      const questions = importData.questions || [];
-      // キャッシュ保存（オフライン用）
-      save("kk2-api-cache", importData);
+function ScopeBadge({ scope }) {
+  const c = scope === "総合" ? C.yellow : C.text3;
+  return scope === "総合" ? (
+    <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 4, background: `${c}20`, color: c, fontWeight: 600 }}>総合</span>
+  ) : null;
+}
 
-      // マージ: 新規追加 + 既存問題のテキスト更新（学習進捗は保持）
-      let merged = [...currentProblems];
-      let added = 0, updated = 0;
-      for (const q of questions) {
-        const vaultId = `vault_${q.topic_id.replace(/\//g, "_")}`;
-        const fresh = vaultToLocal(q);
-        const idx = merged.findIndex(p => p.id === vaultId);
-        if (idx === -1) {
-          merged.push(fresh);
-          added++;
-        } else {
-          // テキスト更新、学習進捗は保持
-          const old = merged[idx];
-          if (old.question !== fresh.question || old.answer !== fresh.answer) {
-            merged[idx] = { ...old, question: fresh.question, type: fresh.type, sources: fresh.sources, summary: fresh.summary, steps: fresh.steps, judgment: fresh.judgment, mistakes: fresh.mistakes, mistakeItems: fresh.mistakeItems, deck: fresh.deck };
-            updated++;
-          }
-        }
-      }
-      setSyncStatus("synced");
-      const msgs = [];
-      if (added) msgs.push(`${added}問追加`);
-      if (updated) msgs.push(`${updated}問更新`);
-      setSyncMsg(msgs.length ? msgs.join(", ") : "最新");
-      return merged;
-    } catch (e) {
-      console.error("API sync error:", e);
-      // オフラインフォールバック: キャッシュから読む
-      try {
-        const cached = load("kk2-api-cache", null);
-        if (cached && cached.questions) {
-          let merged = [...currentProblems];
-          let added = 0, updated = 0;
-          for (const q of cached.questions) {
-            const vaultId = `vault_${q.topic_id.replace(/\//g, "_")}`;
-            const fresh = vaultToLocal(q);
-            const idx = merged.findIndex(p => p.id === vaultId);
-            if (idx === -1) {
-              merged.push(fresh);
-              added++;
-            } else {
-              const old = merged[idx];
-              if (old.question !== fresh.question || old.answer !== fresh.answer) {
-                merged[idx] = { ...old, question: fresh.question, type: fresh.type, sources: fresh.sources, summary: fresh.summary, steps: fresh.steps, judgment: fresh.judgment, mistakes: fresh.mistakes, mistakeItems: fresh.mistakeItems, deck: fresh.deck };
-                updated++;
-              }
-            }
-          }
-          setSyncStatus("offline");
-          const offMsgs = [];
-          if (added) offMsgs.push(`${added}問追加`);
-          if (updated) offMsgs.push(`${updated}問更新`);
-          setSyncMsg(`オフライン${offMsgs.length ? `（${offMsgs.join(", ")}）` : ""}`);
-          return merged;
-        }
-      } catch {}
-      setSyncStatus("error");
-      setSyncMsg(e.message || "同期エラー");
-      return currentProblems;
-    }
-  }, []);
+// ── Book labels ──
+const BOOK_ORDER = [
+  "法人計算問題集1-1", "法人計算問題集1-2",
+  "法人計算問題集2-1", "法人計算問題集2-2",
+  "法人計算問題集3-1", "法人計算問題集3-2",
+  "法人理論問題集",
+];
+const BOOK_SHORT = {
+  "法人計算問題集1-1": "計算1-1", "法人計算問題集1-2": "計算1-2",
+  "法人計算問題集2-1": "計算2-1", "法人計算問題集2-2": "計算2-2",
+  "法人計算問題集3-1": "計算3-1", "法人計算問題集3-2": "計算3-2",
+  "法人理論問題集": "理論",
+};
 
-  // ── API sync: push results after session ──
-  const pushResultsToAPI = useCallback(async (currentProblems) => {
-    const token = load("kk2-api-token", "");
-    const url = load("kk2-api-url", "");
-    if (!token) return;
-    try {
-      const payload = buildResultsPayload(currentProblems);
-      if (!payload.results.length) return;
-      await apiFetch(`${apiBase(url)}/api/komekome/result`, token, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      setSyncMsg("結果送信済み");
-      // pendingSync をクリア
-      save("kk2-pendingSync", null);
-    } catch (e) {
-      console.error("Push results error:", e);
-      // オフライン: pendingSync にキュー保存
-      const payload = buildResultsPayload(currentProblems);
-      const pending = load("kk2-pendingSync", []);
-      pending.push(payload);
-      save("kk2-pendingSync", pending);
-      setSyncStatus("error");
-      setSyncMsg("結果送信失敗（次回リトライ）");
-    }
-  }, []);
+// ── Card component ──
+function Card({ title, children, style: extra = {} }) {
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: "16px 18px", marginBottom: 12, ...extra }}>
+      {title && <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 12 }}>{title}</div>}
+      {children}
+    </div>
+  );
+}
 
-  // ── Retry pending sync on load ──
-  const retryPendingSync = useCallback(async (token, url) => {
-    if (!token) return;
-    const pending = load("kk2-pendingSync", []);
-    if (!pending || !pending.length) return;
-    const remaining = [];
-    for (const payload of pending) {
-      try {
-        await apiFetch(`${apiBase(url)}/api/komekome/result`, token, {
-          method: "POST",
-          body: JSON.stringify(payload),
-        });
-      } catch {
-        remaining.push(payload);
-      }
-    }
-    save("kk2-pendingSync", remaining.length ? remaining : null);
-  }, []);
+// ── Auth image (fetches with Bearer token, renders as blob URL) ──
+function AuthImage({ src, token, style: extra = {}, alt = "" }) {
+  const [blobUrl, setBlobUrl] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
-    // URL hash でトークン自動セットアップ: komekome.pages.dev/#token=xxx
-    // Cookie にも保存 → ホーム画面追加後も引き継がれる
+    let objectUrl = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(src, { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) throw new Error(res.status);
+        const blob = await res.blob();
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setBlobUrl(objectUrl);
+      } catch {
+        if (!cancelled) setError(true);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [src, token]);
+
+  if (loading) return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 40, color: C.text3, fontSize: 13, ...extra }}>読込中...</div>
+  );
+  if (error) return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 40, color: C.red, fontSize: 13, ...extra }}>画像を読み込めません</div>
+  );
+  return <img src={blobUrl} alt={alt} style={{ maxWidth: "100%", borderRadius: 8, ...extra }} />;
+}
+
+// ── Reason badge for today's problems ──
+function ReasonBadge({ reason }) {
+  const colors = {
+    "弱点集中": C.red, "失効復習": C.red, "卒業後復習": C.purple,
+    "間隔復習": C.blue, "弱点補強": C.yellow,
+    "3日後復習": C.green, "7日後復習": C.green, "14日後復習": C.green, "28日後復習": C.green,
+    "新規A論点": C.accent, "新規B論点": C.text2,
+  };
+  const c = colors[reason] || C.text3;
+  return <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: `${c}20`, color: c, fontWeight: 600 }}>{reason}</span>;
+}
+
+// ── Bar chart (horizontal) ──
+function HBar({ label, value, max, color, sub }) {
+  const pct = max > 0 ? (value / max) * 100 : 0;
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+        <span style={{ color: C.text2, fontSize: 12 }}>{label}</span>
+        <span style={{ color, fontSize: 12, fontWeight: 700 }}>{value}</span>
+      </div>
+      <div style={{ height: 6, background: C.surface3, borderRadius: 3, overflow: "hidden" }}>
+        <div style={{ height: "100%", background: color, width: `${Math.min(pct, 100)}%`, borderRadius: 3, transition: "width 0.3s" }} />
+      </div>
+      {sub && <div style={{ color: C.text3, fontSize: 9, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+// ── Stat number ──
+function StatNum({ value, label, color, cols }) {
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 8px", textAlign: "center" }}>
+      <div style={{ color: color || C.text, fontSize: 20, fontWeight: 700 }}>{value}</div>
+      <div style={{ color: C.text3, fontSize: 10, marginTop: 2 }}>{label}</div>
+    </div>
+  );
+}
+
+// ── Daily mini bar chart ──
+function DailyChart({ dailyData, maxVal, color }) {
+  const bars = dailyData.slice(-14); // last 14 days
+  return (
+    <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 50 }}>
+      {bars.map((d, i) => {
+        const h = maxVal > 0 ? Math.max((d.value / maxVal) * 48, d.value > 0 ? 3 : 0) : 0;
+        return (
+          <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+            <div style={{ width: "100%", height: h, background: color, borderRadius: 2, transition: "height 0.3s" }} />
+            {i % 2 === 0 && <span style={{ color: C.text3, fontSize: 7 }}>{d.label}</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ═══════ STATS VIEW ═══════
+const PERIODS = [
+  { id: "day", label: "今日" },
+  { id: "week", label: "週" },
+  { id: "month", label: "月" },
+  { id: "year", label: "年" },
+  { id: "all", label: "累計" },
+];
+
+function StatsView({ attempts, problems, problemList, onBack }) {
+  const [period, setPeriod] = useState("week");
+
+  // Filter attempts by period
+  const filtered = useMemo(() => {
+    const t = today();
+    let start;
+    switch (period) {
+      case "day": start = t; break;
+      case "week": start = weekStart(t); break;
+      case "month": start = monthStart(t); break;
+      case "year": start = yearStart(t); break;
+      default: start = "2000-01-01";
+    }
+    return attempts.filter(a => a.date >= start);
+  }, [attempts, period]);
+
+  // Core metrics
+  const totalCount = filtered.length;
+  const correctCount = filtered.filter(a => a.result === "○").length;
+  const wrongCount = totalCount - correctCount;
+  const rate = totalCount > 0 ? Math.round(correctCount / totalCount * 100) : null;
+  const totalTime = filtered.reduce((s, a) => s + (a.time_min || 0), 0);
+  const uniqueProblems = new Set(filtered.map(a => a.problem_id)).size;
+
+  // Mistakes distribution
+  const mistakeMap = {};
+  filtered.filter(a => a.result === "×" && a.mistakes).forEach(a => {
+    a.mistakes.forEach(m => { mistakeMap[m] = (mistakeMap[m] || 0) + 1; });
+  });
+  const mistakeEntries = Object.entries(mistakeMap).sort((a, b) => b[1] - a[1]);
+  const maxMistake = mistakeEntries.length > 0 ? mistakeEntries[0][1] : 1;
+
+  // By book
+  const bookStats = useMemo(() => {
+    const bs = {};
+    filtered.forEach(a => {
+      const p = problems[a.problem_id];
+      const book = p ? p.book : "不明";
+      if (!bs[book]) bs[book] = { correct: 0, wrong: 0, total: 0, time: 0, ids: new Set() };
+      bs[book].total++;
+      bs[book].time += a.time_min || 0;
+      bs[book].ids.add(a.problem_id);
+      if (a.result === "○") bs[book].correct++; else bs[book].wrong++;
+    });
+    return bs;
+  }, [filtered, problems]);
+
+  // Daily trend (last 14 days for week+, last 7 for day)
+  const dailyTrend = useMemo(() => {
+    const days = period === "day" ? 1 : period === "week" ? 7 : 14;
+    const t = today();
+    const data = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = dateAdd(t, -i);
+      const dayAttempts = attempts.filter(a => a.date === d);
+      data.push({
+        date: d,
+        label: fmtDate(d),
+        value: dayAttempts.length,
+        correct: dayAttempts.filter(a => a.result === "○").length,
+        wrong: dayAttempts.filter(a => a.result === "×").length,
+        time: dayAttempts.reduce((s, a) => s + (a.time_min || 0), 0),
+      });
+    }
+    return data;
+  }, [attempts, period]);
+  const maxDaily = Math.max(...dailyTrend.map(d => d.value), 1);
+
+  // Weak problems (by wrong count in period)
+  const weakMap = {};
+  filtered.filter(a => a.result === "×").forEach(a => {
+    weakMap[a.problem_id] = (weakMap[a.problem_id] || 0) + 1;
+  });
+  const weakProblems = Object.entries(weakMap)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 15)
+    .map(([pid, cnt]) => ({ id: pid, wrong: cnt, ...(problems[pid] || { title: pid }) }));
+
+  // Speed analysis: problems where actual time > target time
+  const speedIssues = useMemo(() => {
+    const byProblem = {};
+    filtered.filter(a => a.time_min > 0).forEach(a => {
+      const p = problems[a.problem_id];
+      if (!p || !p.time_min) return;
+      if (!byProblem[a.problem_id]) byProblem[a.problem_id] = { times: [], target: p.time_min, title: p.title, book: p.book };
+      byProblem[a.problem_id].times.push(a.time_min);
+    });
+    return Object.entries(byProblem)
+      .map(([pid, d]) => ({ id: pid, avg: Math.round(d.times.reduce((s, t) => s + t, 0) / d.times.length), target: d.target, title: d.title, book: d.book, ratio: Math.round((d.times.reduce((s, t) => s + t, 0) / d.times.length) / d.target * 100) }))
+      .filter(d => d.ratio > 120) // 20%+ over target
+      .sort((a, b) => b.ratio - a.ratio)
+      .slice(0, 10);
+  }, [filtered, problems]);
+
+  // Coverage: how many of total problems have been attempted
+  const attemptedAll = new Set(attempts.map(a => a.problem_id)).size;
+  const coveragePct = problemList.length > 0 ? Math.round(attemptedAll / problemList.length * 100) : 0;
+
+  // Streak: consecutive days with at least 1 attempt
+  const streak = useMemo(() => {
+    const t = today();
+    let count = 0;
+    let d = t;
+    while (true) {
+      if (attempts.some(a => a.date === d)) { count++; d = dateAdd(d, -1); }
+      else break;
+    }
+    return count;
+  }, [attempts]);
+
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
+      <div style={{ maxWidth: 480, margin: "0 auto" }}>
+        <button onClick={onBack} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← 戻る</button>
+        <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 12px" }}>分析</h2>
+
+        {/* Period selector */}
+        <div style={{ display: "flex", gap: 4, marginBottom: 16 }}>
+          {PERIODS.map(p => (
+            <button key={p.id} onClick={() => setPeriod(p.id)}
+              style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "none", cursor: "pointer", fontFamily: font, fontSize: 12, fontWeight: 600,
+                background: period === p.id ? C.accent : C.surface, color: period === p.id ? "#fff" : C.text3 }}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        {/* KPI cards */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
+          <StatNum value={totalCount} label="解答数" color={C.accent} />
+          <StatNum value={rate !== null ? `${rate}%` : "-"} label="正答率" color={rate >= 80 ? C.green : rate >= 60 ? C.blue : rate !== null ? C.red : C.text3} />
+          <StatNum value={`${totalTime}分`} label="学習時間" color={C.blue} />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
+          <StatNum value={correctCount} label="正解" color={C.green} />
+          <StatNum value={wrongCount} label="不正解" color={C.red} />
+          <StatNum value={uniqueProblems} label="問題種類" color={C.text2} />
+          <StatNum value={`${streak}日`} label="連続" color={C.yellow} />
+        </div>
+
+        {/* Coverage */}
+        <Card title="カバー率">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <span style={{ color: C.text, fontSize: 14, fontWeight: 700 }}>{coveragePct}%</span>
+            <span style={{ color: C.text3, fontSize: 11 }}>{attemptedAll} / {problemList.length}問</span>
+          </div>
+          <div style={{ height: 8, background: C.surface3, borderRadius: 4, overflow: "hidden" }}>
+            <div style={{ height: "100%", background: C.accent, width: `${coveragePct}%`, borderRadius: 4, transition: "width 0.3s" }} />
+          </div>
+        </Card>
+
+        {/* Daily chart */}
+        {period !== "day" && dailyTrend.length > 1 && (
+          <Card title="日別推移">
+            <DailyChart dailyData={dailyTrend} maxVal={maxDaily} color={C.accent} />
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
+              <span style={{ color: C.text3, fontSize: 9 }}>解答数</span>
+              <span style={{ color: C.text3, fontSize: 9 }}>max: {maxDaily}</span>
+            </div>
+          </Card>
+        )}
+
+        {/* By book */}
+        <Card title="問題集別">
+          {BOOK_ORDER.map(book => {
+            const s = bookStats[book];
+            if (!s) return null;
+            const bookRate = s.total > 0 ? Math.round(s.correct / s.total * 100) : 0;
+            const bookTotal = problemList.filter(p => p.book === book).length;
+            const rateColor = bookRate >= 80 ? C.green : bookRate >= 60 ? C.blue : C.red;
+            return (
+              <div key={book} style={{ marginBottom: 10, paddingBottom: 10, borderBottom: `1px solid ${C.border}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                  <span style={{ color: C.text, fontSize: 13, fontWeight: 600 }}>{BOOK_SHORT[book]}</span>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <span style={{ color: C.green, fontSize: 11 }}>{s.correct}○</span>
+                    <span style={{ color: C.red, fontSize: 11 }}>{s.wrong}×</span>
+                    <span style={{ color: rateColor, fontSize: 13, fontWeight: 700 }}>{bookRate}%</span>
+                  </div>
+                </div>
+                <div style={{ height: 6, background: C.surface3, borderRadius: 3, overflow: "hidden", marginBottom: 4 }}>
+                  <div style={{ height: "100%", background: rateColor, width: `${bookRate}%`, borderRadius: 3, transition: "width 0.3s" }} />
+                </div>
+                <div style={{ color: C.text3, fontSize: 10 }}>{s.ids.size}/{bookTotal}問着手 / {s.total}回 / {s.time}分</div>
+              </div>
+            );
+          })}
+        </Card>
+
+        {/* Mistake types */}
+        {mistakeEntries.length > 0 && (
+          <Card title="間違い分類">
+            {mistakeEntries.map(([type, count]) => (
+              <HBar key={type} label={type} value={count} max={maxMistake} color={C.red} />
+            ))}
+          </Card>
+        )}
+
+        {/* Speed issues */}
+        {speedIssues.length > 0 && (
+          <Card title="時間超過（目安の120%超）">
+            {speedIssues.map(si => (
+              <div key={si.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                <span style={{ color: si.ratio > 200 ? C.red : C.yellow, fontSize: 12, fontWeight: 700, minWidth: 36, textAlign: "right" }}>{si.ratio}%</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: C.text, fontSize: 12, lineHeight: 1.3 }}>{si.title}</div>
+                  <div style={{ color: C.text3, fontSize: 10 }}>{si.avg}分 / 目安{si.target}分</div>
+                </div>
+              </div>
+            ))}
+          </Card>
+        )}
+
+        {/* Weak problems */}
+        {weakProblems.length > 0 && (
+          <Card title="弱点問題 TOP15">
+            {weakProblems.map((wp, i) => (
+              <div key={wp.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", borderBottom: i < weakProblems.length - 1 ? `1px solid ${C.border}` : "none" }}>
+                <span style={{ color: C.red, fontSize: 14, fontWeight: 700, minWidth: 28, textAlign: "right" }}>{wp.wrong}×</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: C.text, fontSize: 12, lineHeight: 1.4 }}>{wp.title}</div>
+                  <div style={{ color: C.text3, fontSize: 10 }}>{BOOK_SHORT[wp.book] || wp.book}</div>
+                </div>
+              </div>
+            ))}
+          </Card>
+        )}
+
+        {totalCount === 0 && (
+          <div style={{ color: C.text3, textAlign: "center", padding: 40, fontSize: 14 }}>この期間のデータはありません</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Markdown-like section renderer ──
+function SectionContent({ text }) {
+  if (!text) return null;
+  const lines = text.split("\n");
+  return (
+    <div style={{ fontSize: 13, lineHeight: 1.8, color: C.text }}>
+      {lines.map((line, i) => {
+        const trimmed = line.trim();
+        if (!trimmed) return <div key={i} style={{ height: 8 }} />;
+        if (trimmed.startsWith("### ")) return <div key={i} style={{ fontWeight: 700, fontSize: 13, color: C.accent, marginTop: 12, marginBottom: 4 }}>{trimmed.slice(4)}</div>;
+        if (trimmed.startsWith("| ") && trimmed.endsWith("|")) {
+          const cells = trimmed.split("|").filter(Boolean).map(c => c.trim());
+          if (cells.every(c => /^[-:]+$/.test(c))) return null; // separator row
+          return (
+            <div key={i} style={{ display: "flex", gap: 4, padding: "3px 0", borderBottom: `1px solid ${C.border}` }}>
+              {cells.map((c, j) => <span key={j} style={{ flex: 1, fontSize: 11, color: i === 0 ? C.text3 : C.text }}>{c}</span>)}
+            </div>
+          );
+        }
+        if (trimmed.startsWith("- **")) {
+          const m = trimmed.match(/^- \*\*(.+?)\*\*[：:]?\s*(.*)$/);
+          if (m) return <div key={i} style={{ paddingLeft: 12, marginBottom: 4 }}><span style={{ fontWeight: 700, color: C.blue }}>{m[1]}</span>{m[2] && <span style={{ color: C.text2 }}>: {m[2]}</span>}</div>;
+        }
+        if (trimmed.startsWith("- ")) return <div key={i} style={{ paddingLeft: 12, marginBottom: 2, color: C.text2 }}>{trimmed.slice(2)}</div>;
+        if (trimmed.startsWith("$$")) return <div key={i} style={{ color: C.purple, fontFamily: "monospace", fontSize: 11, padding: "4px 8px", background: C.surface2, borderRadius: 6, marginTop: 4, marginBottom: 4, overflowX: "auto" }}>{trimmed.replace(/\$\$/g, "")}</div>;
+        return <div key={i}>{trimmed}</div>;
+      })}
+    </div>
+  );
+}
+
+// ── Status badge for topics ──
+function StatusBadge({ status }) {
+  const colors = { "卒業": C.green, "復習中": C.blue, "学習中": C.accent, "未着手": C.text3 };
+  const c = colors[status] || C.text3;
+  return <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: `${c}20`, color: c, fontWeight: 600 }}>{status}</span>;
+}
+
+// ═══════ MAIN APP ═══════
+function App() {
+  const [problems, setProblems] = useState({});
+  const [attempts, setAttempts] = useState([]);
+  const [view, setView] = useState("home");
+  const [loaded, setLoaded] = useState(false);
+  const [apiToken, setApiToken] = useState("");
+  const [apiUrl, setApiUrl] = useState("");
+  const [syncStatus, setSyncStatus] = useState("idle");
+  const [syncMsg, setSyncMsg] = useState("");
+
+  // Log flow state
+  const [logBook, setLogBook] = useState(null);
+  const [logProblem, setLogProblem] = useState(null);
+  const [logResult, setLogResult] = useState(null); // "○" or "×"
+  const [logTime, setLogTime] = useState("");
+  const [logMistakes, setLogMistakes] = useState({});
+  const [logMemo, setLogMemo] = useState("");
+
+  // Today's problems state
+  const [todayData, setTodayData] = useState(null);
+  const [todayProblem, setTodayProblem] = useState(null);
+  const [todayTopicCtx, setTodayTopicCtx] = useState(null);
+  const [pageViewStep, setPageViewStep] = useState("view"); // "view" | "mistakes"
+  const [pvMistakes, setPvMistakes] = useState({});
+  const [pvTime, setPvTime] = useState("");
+
+  // Topics state
+  const [topics, setTopics] = useState([]);
+  const [topicCategories, setTopicCategories] = useState([]);
+  const [topicCat, setTopicCat] = useState(null);
+  const [topicItem, setTopicItem] = useState(null);
+  const [topicSearch, setTopicSearch] = useState("");
+
+  // Settings
+  const [apiTokenInput, setApiTokenInput] = useState("");
+  const [apiUrlInput, setApiUrlInput] = useState("");
+
+  // ── Init ──
+  useEffect(() => {
     const hash = location.hash;
     if (hash.startsWith("#token=")) {
       const t = decodeURIComponent(hash.slice(7));
-      if (t) {
-        save("kk2-api-token", t);
-        save("kk2-api-url", "");
-        setCookie("kk2_token", t);
-        history.replaceState(null, "", location.pathname);
-      }
+      if (t) { save("kk3-api-token", t); save("kk3-api-url", ""); setCookie("kk3_token", t); history.replaceState(null, "", location.pathname); }
     }
-
-    // localStorage → cookie fallback（Safari → standalone 移行対応）
-    let savedToken = load("kk2-api-token", "");
-    if (!savedToken) {
-      const cookieToken = getCookie("kk2_token");
-      if (cookieToken) {
-        savedToken = cookieToken;
-        save("kk2-api-token", savedToken);
-      }
-    }
-    const savedUrl = load("kk2-api-url", "");
-    setApiToken(savedToken);
-    setApiTokenInput(savedToken);
-    setApiUrl(savedUrl);
-    setApiUrlInput(savedUrl);
-    let probs = load("kk2-problems", []);
-    setDecks(load("kk2-decks", ["デフォルト"]));
+    let savedToken = load("kk3-api-token", "");
+    if (!savedToken) { const ct = getCookie("kk3_token"); if (ct) { savedToken = ct; save("kk3-api-token", savedToken); } }
+    const savedUrl = load("kk3-api-url", "");
+    setApiToken(savedToken); setApiTokenInput(savedToken);
+    setApiUrl(savedUrl); setApiUrlInput(savedUrl);
+    setAttempts(load("kk3-attempts", []));
 
     (async () => {
       if (savedToken) {
-        await retryPendingSync(savedToken, savedUrl);
-        probs = await syncFromAPI(probs, savedToken, savedUrl);
+        setSyncStatus("syncing");
+        try {
+          const pData = await apiFetch(`${apiBase(savedUrl)}/api/komekome/problems`, savedToken);
+          if (pData && pData.problems) { setProblems(pData.problems); save("kk3-problems", pData.problems); }
+          // Merge remote attempts
+          const aData = await apiFetch(`${apiBase(savedUrl)}/api/komekome/attempts`, savedToken);
+          if (aData && aData.attempts) {
+            const local = load("kk3-attempts", []);
+            const remoteIds = new Set(aData.attempts.map(a => a.id));
+            const localOnly = local.filter(a => !remoteIds.has(a.id));
+            const merged = [...aData.attempts, ...localOnly];
+            merged.sort((a, b) => b.id.localeCompare(a.id));
+            setAttempts(merged);
+            save("kk3-attempts", merged);
+            // Push local-only back to server
+            if (localOnly.length > 0) {
+              try { await apiFetch(`${apiBase(savedUrl)}/api/komekome/attempts`, savedToken, { method: "POST", body: JSON.stringify(localOnly) }); } catch {}
+            }
+          }
+          // Fetch topics
+          try {
+            const tData = await apiFetch(`${apiBase(savedUrl)}/api/komekome/topics`, savedToken);
+            if (tData && tData.topics) {
+              setTopics(tData.topics); setTopicCategories(tData.categories || []);
+              save("kk3-topics", tData.topics); save("kk3-topic-cats", tData.categories || []);
+            }
+          } catch {}
+          // Fetch today's problems
+          try {
+            const tdData = await apiFetch(`${apiBase(savedUrl)}/api/komekome/today`, savedToken);
+            if (tdData && tdData.topics) {
+              setTodayData(tdData); save("kk3-today", tdData);
+            }
+          } catch {}
+          setSyncStatus("synced"); setSyncMsg("OK");
+        } catch (e) {
+          // Offline fallback
+          const cached = load("kk3-problems", {});
+          if (Object.keys(cached).length > 0) setProblems(cached);
+          const cachedTopics = load("kk3-topics", []);
+          if (cachedTopics.length > 0) { setTopics(cachedTopics); setTopicCategories(load("kk3-topic-cats", [])); }
+          const cachedToday = load("kk3-today", null);
+          if (cachedToday) setTodayData(cachedToday);
+          setSyncStatus("offline"); setSyncMsg(e.message);
+        }
+      } else {
+        const cached = load("kk3-problems", {});
+        if (Object.keys(cached).length > 0) setProblems(cached);
       }
-      setProblems(probs);
       setLoaded(true);
     })();
-  }, [syncFromAPI, retryPendingSync]);
-
-  useEffect(() => { if (loaded) save("kk2-problems", problems); }, [problems, loaded]);
-  useEffect(() => { if (loaded) save("kk2-decks", decks); }, [decks, loaded]);
-
-  const flash = useCallback((t) => {
-    setFeedback(t);
-    if (fbTimer.current) clearTimeout(fbTimer.current);
-    fbTimer.current = setTimeout(() => setFeedback(null), 700);
   }, []);
 
-  // ── Timer tick ──
-  useEffect(() => {
-    if (!timerStart) return;
-    const iv = setInterval(() => setTimerElapsed(Math.floor((Date.now() - timerStart) / 1000)), 1000);
-    return () => clearInterval(iv);
-  }, [timerStart]);
+  // ── Save attempts on change ──
+  useEffect(() => { if (loaded) save("kk3-attempts", attempts); }, [attempts, loaded]);
 
-  // ── Build session ──
-  const startSession = useCallback(() => {
-    const now = today();
-    const due = problems.filter(p =>
-      !p.graduated && (!p.nextReview || p.nextReview <= now)
-    );
-    if (!due.length) return;
-    setQueue(shuffle(due.map(p => p.id)));
-    setCurIdx(0);
-    setSessionKomeMap({});
-    setShowAns(false);
-    setStats({ correct: 0, wrong: 0, cycleComplete: 0 });
-    setTimerStart(Date.now());
-    setTimerElapsed(0);
-    setCheckedMistakes({});
-    setMistakeMemo("");
-    setSessionActive(true);
-    setView("session");
-  }, [problems]);
+  // ── Derived data ──
+  const problemList = useMemo(() => Object.values(problems), [problems]);
+  const bookProblems = useMemo(() => {
+    if (!logBook) return [];
+    return problemList.filter(p => p.book === logBook).sort((a, b) => {
+      // Sort by page, then by number
+      if (a.page !== b.page) return a.page - b.page;
+      return a.number.localeCompare(b.number, "ja");
+    });
+  }, [problemList, logBook]);
 
-  const curProblem = sessionActive && curIdx < queue.length
-    ? problems.find(p => p.id === queue[curIdx]) : null;
-  const curSessionKome = curProblem ? (sessionKomeMap[curProblem.id] || 0) : 0;
-  const sessionDone = view === "session" && sessionActive && (!curProblem || curIdx >= queue.length);
-  const pushDoneRef = useRef(false);
+  const todayAttempts = useMemo(() => {
+    const t = today();
+    return attempts.filter(a => a.date === t);
+  }, [attempts]);
 
-  // ── Auto-push results on session complete ──
-  useEffect(() => {
-    if (sessionDone && !pushDoneRef.current) {
-      pushDoneRef.current = true;
-      pushResultsToAPI(problems);
-    }
-    if (!sessionDone) pushDoneRef.current = false;
-  }, [sessionDone, problems, pushResultsToAPI]);
+  const problemAttempts = useCallback((pid) => {
+    return attempts.filter(a => a.problem_id === pid);
+  }, [attempts]);
 
-  // ── Handle answer ──
-  const advanceToNext = useCallback(() => {
-    setCurIdx(i => i + 1);
-    setShowAns(false);
-    setTimerStart(Date.now());
-    setTimerElapsed(0);
-    setCheckedMistakes({});
-    setMistakeMemo("");
-  }, []);
-
-  const handleAnswer = useCallback((correct) => {
-    if (!curProblem) return;
-    const pid = curProblem.id;
-    const now = today();
-    const seconds = timerElapsed;
-    const selectedMistakes = Object.keys(checkedMistakes).filter(k => checkedMistakes[k]);
-    const memo = mistakeMemo.trim();
-
-    const entry = {
-      date: now,
-      result: correct ? "○" : "×",
-      komeTotal: 0,
-      time_seconds: seconds,
-      ...(selectedMistakes.length ? { mistakes: selectedMistakes } : {}),
-      ...(memo ? { memo } : {}),
+  // ── Submit attempt ──
+  const submitAttempt = useCallback(async () => {
+    if (!logProblem || !logResult) return;
+    const selectedMistakes = Object.entries(logMistakes).filter(([, v]) => v).map(([k]) => k);
+    const attempt = {
+      id: `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
+      date: today(),
+      problem_id: logProblem.id,
+      result: logResult,
+      time_min: parseInt(logTime) || 0,
+      mistakes: logResult === "×" ? selectedMistakes : [],
+      memo: logMemo.trim(),
     };
 
-    if (correct) {
-      flash("correct");
-      setStats(s => ({ ...s, correct: s.correct + 1 }));
+    const newAttempts = [attempt, ...attempts];
+    setAttempts(newAttempts);
 
-      setProblems(prev => prev.map(p => {
-        if (p.id !== pid) return p;
-        const np = { ...p };
-        entry.komeTotal = np.komeTotal;
-        np.history = [...(np.history || []), entry];
-        np.lastReviewed = now;
-        const nextInt = (np.intervalIndex || 0) + 1;
-        if (nextInt > INTERVALS.length) {
-          np.graduated = true;
-          np.nextReview = null;
-          np.graduatedAt = now;
-        } else {
-          np.intervalIndex = nextInt;
-          np.nextReview = addDays(now, INTERVALS[nextInt - 1]);
-        }
-        return np;
-      }));
-
-      setTimeout(advanceToNext, 500);
-
-    } else {
-      flash("wrong");
-      setStats(s => ({ ...s, wrong: s.wrong + 1 }));
-      const newSessionKome = curSessionKome + 1;
-
-      setProblems(prev => prev.map(p => {
-        if (p.id !== pid) return p;
-        const np = { ...p };
-        np.komeTotal = (np.komeTotal || 0) + 1;
-        entry.komeTotal = np.komeTotal;
-        np.history = [...(np.history || []), entry];
-        np.lastReviewed = now;
-        return np;
-      }));
-
-      if (newSessionKome >= SESSION_KOME_MAX) {
-        setStats(s => ({ ...s, cycleComplete: s.cycleComplete + 1 }));
-        setSessionKomeMap(m => ({ ...m, [pid]: 0 }));
-
-        setProblems(prev => prev.map(p => {
-          if (p.id !== pid) return p;
-          const np = { ...p };
-          const nextInt = (np.intervalIndex || 0) + 1;
-          if (nextInt > INTERVALS.length) {
-            np.graduated = true;
-            np.nextReview = null;
-            np.graduatedAt = now;
-          } else {
-            np.intervalIndex = nextInt;
-            np.nextReview = addDays(now, INTERVALS[nextInt - 1]);
-          }
-          return np;
-        }));
-
-        setTimeout(advanceToNext, 500);
-      } else {
-        setSessionKomeMap(m => ({ ...m, [pid]: newSessionKome }));
-        setQueue(q => {
-          const nq = [...q];
-          const insertAt = Math.min(curIdx + 1 + REINSERT_GAP, nq.length);
-          nq.splice(insertAt, 0, pid);
-          return nq;
-        });
-        setTimeout(advanceToNext, 500);
-      }
+    // Push to API
+    const token = load("kk3-api-token", "");
+    const url = load("kk3-api-url", "");
+    if (token) {
+      try { await apiFetch(`${apiBase(url)}/api/komekome/attempts`, token, { method: "POST", body: JSON.stringify([attempt]) }); }
+      catch { /* stored locally, will sync later */ }
     }
-  }, [curProblem, curSessionKome, curIdx, flash, timerElapsed, checkedMistakes, mistakeMemo, advanceToNext]);
 
-  // ── Add problem ──
-  const addProblem = useCallback(() => {
-    if (!newQ.trim()) return;
-    setProblems(prev => [...prev, {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      question: newQ.trim(), answer: newA.trim(), deck: newDeck,
-      komeTotal: 0, intervalIndex: 0, nextReview: null,
-      lastReviewed: null, graduated: false, graduatedAt: null,
-      history: [], createdAt: today(), source: "manual",
-    }]);
-    setNewQ(""); setNewA("");
-  }, [newQ, newA, newDeck]);
+    // Reset and go to confirmation
+    setView("logged");
+  }, [logProblem, logResult, logTime, logMistakes, logMemo, attempts]);
 
-  const addBulk = useCallback(() => {
-    const lines = bulkText.split("\n").filter(l => l.trim());
-    const np = lines.map(line => {
-      const [q, a] = line.split("\t").length > 1 ? line.split("\t") : line.split("|");
-      return {
-        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-        question: (q || line).trim(), answer: (a || "").trim(), deck: newDeck,
-        komeTotal: 0, intervalIndex: 0, nextReview: null,
-        lastReviewed: null, graduated: false, graduatedAt: null,
-        history: [], createdAt: today(), source: "manual",
-      };
-    });
-    setProblems(prev => [...prev, ...np]);
-    setBulkText(""); setBulkMode(false);
-  }, [bulkText, newDeck]);
+  const resetLog = useCallback(() => {
+    setLogBook(null); setLogProblem(null); setLogResult(null);
+    setLogTime(""); setLogMistakes({}); setLogMemo("");
+  }, []);
 
-  // ── Export to Obsidian Markdown ──
-  const exportObsidian = useCallback(() => {
-    const now = today();
-    let md = `# コメコメ暗記 進捗レポート\n\nエクスポート日: ${now}\n\n`;
-    md += `## サマリー\n\n`;
-    md += `| 指標 | 値 |\n|---|---|\n`;
-    md += `| 全問題数 | ${problems.length} |\n`;
-    md += `| 卒業済み | ${problems.filter(p => p.graduated).length} |\n`;
-    md += `| 総コメ数 | ${problems.reduce((s, p) => s + (p.komeTotal || 0), 0)} |\n`;
-    md += `| 今日の対象 | ${problems.filter(p => !p.graduated && (!p.nextReview || p.nextReview <= now)).length} |\n\n`;
+  const resetPageView = useCallback(() => {
+    setTodayProblem(null); setTodayTopicCtx(null);
+    setPageViewStep("view"); setPvMistakes({}); setPvTime("");
+  }, []);
 
-    const deckSet = [...new Set(problems.map(p => p.deck))];
-    md += `## デッキ別\n\n`;
-    md += `| デッキ | 問題数 | 卒業 | 総コメ | コメ率 |\n|---|---|---|---|---|\n`;
-    deckSet.forEach(d => {
-      const dp = problems.filter(p => p.deck === d);
-      const totalH = dp.reduce((s, p) => s + (p.history || []).length, 0);
-      const totalK = dp.reduce((s, p) => s + (p.komeTotal || 0), 0);
-      const rate = totalH ? Math.round(totalK / totalH * 100) : 0;
-      md += `| ${d} | ${dp.length} | ${dp.filter(p => p.graduated).length} | ${totalK} | ${rate}% |\n`;
-    });
+  const submitPageViewAttempt = useCallback(async (result) => {
+    if (!todayProblem) return;
+    const selectedMistakes = Object.entries(pvMistakes).filter(([, v]) => v).map(([k]) => k);
+    const attempt = {
+      id: `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
+      date: today(),
+      problem_id: todayProblem.problem_id,
+      result,
+      time_min: parseInt(pvTime) || 0,
+      mistakes: result === "×" ? selectedMistakes : [],
+      memo: "",
+    };
+    const newAttempts = [attempt, ...attempts];
+    setAttempts(newAttempts);
+    const token = load("kk3-api-token", "");
+    const url = load("kk3-api-url", "");
+    if (token) {
+      try { await apiFetch(`${apiBase(url)}/api/komekome/attempts`, token, { method: "POST", body: JSON.stringify([attempt]) }); }
+      catch {}
+    }
+    resetPageView();
+    setView("today");
+  }, [todayProblem, pvMistakes, pvTime, attempts, resetPageView]);
 
-    md += `\n## 問題別コメ経過\n\n`;
-    const sorted = [...problems].sort((a, b) => (b.komeTotal || 0) - (a.komeTotal || 0));
-    sorted.forEach(p => {
-      const komeBar = "🟧".repeat(Math.min(p.komeTotal || 0, 20));
-      const statusTag = p.graduated ? " ✅卒業" : ` 次回: ${p.nextReview || "未定"}`;
-      md += `### ${p.question}\n\n`;
-      md += `- デッキ: ${p.deck}\n`;
-      md += `- 累積コメ: **${p.komeTotal || 0}** ${komeBar}\n`;
-      md += `- ステージ: ${["初回", "3日後", "7日後", "14日後", "28日後", "卒業"][Math.min(p.intervalIndex || 0, 5)]}${statusTag}\n`;
-
-      if (p.history && p.history.length > 0) {
-        md += `- 履歴:\n\n`;
-        md += `| 日付 | 結果 | 累積コメ |\n|---|---|---|\n`;
-        p.history.forEach(h => {
-          md += `| ${h.date} | ${h.result} | ${h.komeTotal} |\n`;
-        });
-      }
-      md += `\n`;
-    });
-
-    setExportText(md);
-  }, [problems]);
-
-  // ── Stats ──
-  const now = today();
-  const dueCount = problems.filter(p => !p.graduated && (!p.nextReview || p.nextReview <= now)).length;
-  const graduatedCount = problems.filter(p => p.graduated).length;
-  const totalKome = problems.reduce((s, p) => s + (p.komeTotal || 0), 0);
-  const upcoming = INTERVALS.map(d => ({
-    days: d,
-    count: problems.filter(p => p.nextReview === addDays(now, d)).length,
-  }));
-
-  const filteredProblems = deckFilter === "all" ? problems : problems.filter(p => p.deck === deckFilter);
-
+  // ── Loading ──
   if (!loaded) return (
     <div style={{ background: C.bg, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <span style={{ color: C.text3, fontFamily: font }}>読み込み中...</span>
+      <span style={{ color: C.text3, fontFamily: font }}>Loading...</span>
     </div>
   );
 
   // ═══════ SETTINGS ═══════
-  if (showSettings) {
+  if (view === "settings") {
     return (
       <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
         <div style={{ maxWidth: 480, margin: "0 auto" }}>
-          <button onClick={() => setShowSettings(false)}
-            style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 12 }}>
-            ← 戻る
-          </button>
-          <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 20px" }}>API 同期設定</h2>
-
-          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
-            <div style={{ color: C.text3, fontSize: 11, marginBottom: 6 }}>API URL（空欄 = 同一サーバー）</div>
-            <input
-              type="url"
-              value={apiUrlInput}
-              onChange={e => setApiUrlInput(e.target.value)}
-              placeholder="空欄でOK（別サーバー時のみ入力）"
-              style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, padding: "10px 14px", fontSize: 14, fontFamily: "monospace", marginBottom: 10, boxSizing: "border-box", outline: "none" }}
-            />
-            <div style={{ color: C.text3, fontSize: 11, marginBottom: 6 }}>API Token</div>
-            <input
-              type="password"
-              value={apiTokenInput}
-              onChange={e => setApiTokenInput(e.target.value)}
-              placeholder="your-secret-token"
-              style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, padding: "10px 14px", fontSize: 14, fontFamily: "monospace", marginBottom: 10, boxSizing: "border-box", outline: "none" }}
-            />
-            <div style={{ display: "flex", gap: 8 }}>
-              <Btn onClick={async () => {
-                const newToken = apiTokenInput.trim();
-                const newUrl = apiUrlInput.trim().replace(/\/+$/, "");
-                setApiToken(newToken);
-                setApiUrl(newUrl);
-                save("kk2-api-token", newToken);
-                save("kk2-api-url", newUrl);
-                setCookie("kk2_token", newToken);
-                if (newToken) {
-                  setSyncStatus("syncing");
-                  setSyncMsg("テスト中...");
-                  try {
-                    const ctrl = new AbortController();
-                    const timer = setTimeout(() => ctrl.abort(), 10000);
-                    const testUrl = `${apiBase(newUrl)}/api/komekome/import`;
-                    const res = await fetch(testUrl, {
-                      method: "GET",
-                      headers: { Authorization: `Bearer ${newToken}` },
-                      signal: ctrl.signal,
-                    });
-                    clearTimeout(timer);
-                    if (res.status === 401) {
-                      setSyncStatus("error");
-                      setSyncMsg("認証エラー: トークンが不正です");
-                    } else if (!res.ok) {
-                      setSyncStatus("error");
-                      setSyncMsg(`サーバーエラー: ${res.status}`);
-                    } else {
-                      await res.json();
-                      setSyncStatus("synced");
-                      setSyncMsg("接続OK");
-                    }
-                  } catch (e) {
-                    setSyncStatus("error");
-                    setSyncMsg(`接続失敗: ${e.message || "ネットワークエラー"}`);
-                  }
-                } else {
-                  setSyncStatus("idle");
-                  setSyncMsg("トークンを入力してください");
-                }
-              }} bg={syncStatus === "syncing" ? C.surface3 : C.kome} disabled={syncStatus === "syncing"} color="#fff" style={{ flex: 1, padding: "10px" }}>{syncStatus === "syncing" ? "テスト中..." : "保存 & テスト"}</Btn>
-              <Btn onClick={() => {
-                setApiTokenInput("");
-                setApiUrlInput("");
-                setApiToken("");
-                setApiUrl("");
-                save("kk2-api-token", "");
-                save("kk2-api-url", "");
-                setCookie("kk2_token", "");
-                setSyncStatus("idle");
-                setSyncMsg("");
-              }} bg={C.surface3} color={C.text3} style={{ padding: "10px 16px" }}>クリア</Btn>
-            </div>
-          </div>
-
+          <button onClick={() => setView("home")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 12 }}>← 戻る</button>
+          <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 20px" }}>設定</h2>
           <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
+            <div style={{ color: C.text3, fontSize: 11, marginBottom: 6 }}>API URL（空欄 = 同一サーバー）</div>
+            <input type="url" value={apiUrlInput} onChange={e => setApiUrlInput(e.target.value)}
+              placeholder="空欄でOK" style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, padding: "10px 14px", fontSize: 14, fontFamily: "monospace", marginBottom: 10, boxSizing: "border-box", outline: "none" }} />
+            <div style={{ color: C.text3, fontSize: 11, marginBottom: 6 }}>API Token</div>
+            <input type="password" value={apiTokenInput} onChange={e => setApiTokenInput(e.target.value)}
+              placeholder="your-secret-token" style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, padding: "10px 14px", fontSize: 14, fontFamily: "monospace", marginBottom: 10, boxSizing: "border-box", outline: "none" }} />
+            <Btn onClick={async () => {
+              const newToken = apiTokenInput.trim();
+              const newUrl = apiUrlInput.trim().replace(/\/+$/, "");
+              setApiToken(newToken); setApiUrl(newUrl);
+              save("kk3-api-token", newToken); save("kk3-api-url", newUrl); setCookie("kk3_token", newToken);
+              if (newToken) {
+                setSyncStatus("syncing"); setSyncMsg("テスト中...");
+                try {
+                  const res = await fetch(`${apiBase(newUrl)}/api/komekome/problems`, { method: "GET", headers: { Authorization: `Bearer ${newToken}` } });
+                  if (res.status === 401) { setSyncStatus("error"); setSyncMsg("認証エラー"); }
+                  else if (!res.ok) { setSyncStatus("error"); setSyncMsg(`Error: ${res.status}`); }
+                  else { setSyncStatus("synced"); setSyncMsg("接続OK"); }
+                } catch (e) { setSyncStatus("error"); setSyncMsg(e.message); }
+              }
+            }} bg={C.accent} color="#fff" style={{ width: "100%", padding: "10px" }}>保存 & テスト</Btn>
+          </div>
+          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginTop: 12 }}>
             <div style={{ color: C.text3, fontSize: 11, marginBottom: 8 }}>同期ステータス</div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{
-                width: 8, height: 8, borderRadius: "50%",
-                background: syncStatus === "synced" ? C.green : syncStatus === "error" ? C.red : syncStatus === "syncing" ? C.blue : syncStatus === "offline" ? C.kome : C.text3,
-              }} />
-              <span style={{ color: C.text2, fontSize: 13 }}>
-                {syncStatus === "synced" ? "接続済み" : syncStatus === "error" ? "エラー" : syncStatus === "syncing" ? "同期中..." : syncStatus === "offline" ? "オフライン" : "未設定"}
-              </span>
-              {syncMsg && <span style={{ color: C.text3, fontSize: 11, marginLeft: 4 }}>({syncMsg})</span>}
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: syncStatus === "synced" ? C.green : syncStatus === "error" ? C.red : C.text3 }} />
+              <span style={{ color: C.text2, fontSize: 13 }}>{syncStatus === "synced" ? "接続済み" : syncStatus === "error" ? "エラー" : syncStatus === "offline" ? "オフライン" : "未設定"}</span>
+              {syncMsg && <span style={{ color: C.text3, fontSize: 11 }}>({syncMsg})</span>}
             </div>
-            {(() => {
-              const pending = load("kk2-pendingSync", []);
-              if (pending && pending.length > 0) {
-                return (
-                  <div style={{ color: C.kome, fontSize: 11, marginTop: 8 }}>
-                    未送信セッション: {pending.length}件
-                  </div>
-                );
-              }
-              return null;
-            })()}
-            {apiToken && (
-              <Btn onClick={async () => {
-                const merged = await syncFromAPI(problems, apiToken, apiUrl);
-                setProblems(merged);
-              }} bg={C.surface2} color={C.text2} style={{ width: "100%", marginTop: 12, border: `1px solid ${C.border}`, padding: "10px" }}>
-                今すぐ同期
-              </Btn>
-            )}
+            <div style={{ color: C.text3, fontSize: 11, marginTop: 12 }}>問題数: {problemList.length} / 記録数: {attempts.length}</div>
           </div>
         </div>
       </div>
     );
   }
 
-  // ═══════ SESSION ═══════
-  if (view === "session" && sessionActive) {
-    if (!curProblem || curIdx >= queue.length) {
-      return (
-        <div style={{ background: C.bg, minHeight: "100vh", padding: "40px 20px", fontFamily: font }}>
-          <div style={{ maxWidth: 480, margin: "0 auto", textAlign: "center" }}>
-            <div style={{ fontSize: 48, marginBottom: 16 }}>🎉</div>
-            <h2 style={{ color: C.text, fontSize: 22, fontWeight: 700, margin: "0 0 20px" }}>セッション完了</h2>
-            {syncMsg && (
-              <div style={{ color: syncStatus === "error" ? C.red : C.green, fontSize: 12, marginBottom: 12 }}>
-                同期: {syncMsg}
-              </div>
-            )}
-            <div style={{ display: "flex", justifyContent: "center", gap: 24, margin: "24px 0" }}>
-              {[
-                { v: stats.correct, l: "正解", c: C.green },
-                { v: stats.wrong, l: "不正解", c: C.red },
-                { v: stats.cycleComplete, l: "コメ完成", c: C.kome },
-              ].map((s, i) => (
-                <div key={i} style={{ textAlign: "center" }}>
-                  <div style={{ color: s.c, fontSize: 30, fontWeight: 700 }}>{s.v}</div>
-                  <div style={{ color: C.text3, fontSize: 12 }}>{s.l}</div>
-                </div>
-              ))}
-            </div>
-            <Btn onClick={() => { setSessionActive(false); setView("home"); }}
-              bg={C.kome} color="#fff" style={{ width: "100%", marginTop: 16 }}>
-              ホームに戻る
-            </Btn>
+  // ═══════ LOGGED (confirmation) ═══════
+  if (view === "logged") {
+    return (
+      <div style={{ background: C.bg, minHeight: "100vh", padding: "40px 16px", fontFamily: font }}>
+        <div style={{ maxWidth: 480, margin: "0 auto", textAlign: "center" }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>{logResult === "○" ? "○" : "×"}</div>
+          <h2 style={{ color: C.text, fontSize: 20, fontWeight: 700, margin: "0 0 8px" }}>記録しました</h2>
+          <div style={{ color: C.text2, fontSize: 14, marginBottom: 24 }}>{logProblem?.title}</div>
+          <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
+            <Btn onClick={() => { resetLog(); setView("log-book"); }} bg={C.accent} color="#fff">続けて記録</Btn>
+            <Btn onClick={() => { resetLog(); setView("home"); }} bg={C.surface} color={C.text2} style={{ border: `1px solid ${C.border}` }}>ホーム</Btn>
           </div>
         </div>
-      );
-    }
+      </div>
+    );
+  }
 
-    const progress = curIdx / queue.length * 100;
+  // ═══════ LOG: Step 1 - Book Selection ═══════
+  if (view === "log-book") {
+    return (
+      <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
+        <div style={{ maxWidth: 480, margin: "0 auto" }}>
+          <button onClick={() => { resetLog(); setView("home"); }} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 12 }}>← 戻る</button>
+          <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 16px" }}>問題集を選択</h2>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {BOOK_ORDER.map(book => {
+              const count = problemList.filter(p => p.book === book).length;
+              const attemptCount = attempts.filter(a => { const p = problems[a.problem_id]; return p && p.book === book; }).length;
+              return (
+                <button key={book} onClick={() => { setLogBook(book); setView("log-problem"); }}
+                  style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: "16px 20px", cursor: "pointer", fontFamily: font, textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <div style={{ color: C.text, fontSize: 15, fontWeight: 600 }}>{BOOK_SHORT[book] || book}</div>
+                    <div style={{ color: C.text3, fontSize: 11, marginTop: 2 }}>{count}問</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ color: C.accent, fontSize: 14, fontWeight: 700 }}>{attemptCount}</div>
+                    <div style={{ color: C.text3, fontSize: 10 }}>記録</div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════ LOG: Step 2 - Problem Selection ═══════
+  if (view === "log-problem") {
+    return (
+      <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
+        <div style={{ maxWidth: 480, margin: "0 auto" }}>
+          <button onClick={() => setView("log-book")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← {BOOK_SHORT[logBook]}</button>
+          <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 12px" }}>問題を選択</h2>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {bookProblems.map(p => {
+              const pa = problemAttempts(p.id);
+              const lastAttempt = pa.length > 0 ? pa[0] : null;
+              const correctCount = pa.filter(a => a.result === "○").length;
+              const wrongCount = pa.filter(a => a.result === "×").length;
+              return (
+                <button key={p.id} onClick={() => { setLogProblem(p); setLogResult(null); setLogTime(""); setLogMistakes({}); setLogMemo(""); setView("log-result"); }}
+                  style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 16px", cursor: "pointer", fontFamily: font, textAlign: "left", display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ minWidth: 42, textAlign: "center" }}>
+                    <div style={{ color: C.text2, fontSize: 11, fontWeight: 700 }}>{p.number.replace(/^問題\s*/, "")}</div>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ color: C.text, fontSize: 13, fontWeight: 500, lineHeight: 1.4 }}>{p.title}</div>
+                    <div style={{ display: "flex", gap: 6, marginTop: 4, alignItems: "center" }}>
+                      <RankBadge rank={p.rank} />
+                      <ScopeBadge scope={p.scope} />
+                      {p.time_min > 0 && <span style={{ color: C.text3, fontSize: 10 }}>{p.time_min}分</span>}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "right", flexShrink: 0 }}>
+                    {pa.length > 0 ? (
+                      <>
+                        <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                          <span style={{ color: C.green, fontSize: 12, fontWeight: 700 }}>{correctCount}○</span>
+                          <span style={{ color: C.red, fontSize: 12, fontWeight: 700 }}>{wrongCount}×</span>
+                        </div>
+                        <div style={{ color: C.text3, fontSize: 9, marginTop: 2 }}>{lastAttempt?.date?.slice(5)}</div>
+                      </>
+                    ) : (
+                      <span style={{ color: C.text3, fontSize: 11 }}>未着手</span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════ LOG: Step 3 - Result Entry ═══════
+  if (view === "log-result" && logProblem) {
+    const mistakeTypes = getMistakeTypes(logProblem.type);
+    const canSubmit = logResult !== null;
 
     return (
-      <div style={{ background: C.bg, minHeight: "100vh", maxHeight: "100dvh", display: "flex", flexDirection: "column", fontFamily: font, position: "relative", overflow: "hidden" }}>
-        {feedback && (
-          <div style={{
-            position: "fixed", inset: 0, zIndex: 50, pointerEvents: "none",
-            background: feedback === "correct" ? C.greenDim : C.redDim,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            animation: "pulse 0.6s ease-out forwards",
-          }}>
-            <span style={{ fontSize: 64, opacity: 0.8 }}>{feedback === "correct" ? "○" : "×"}</span>
-          </div>
-        )}
-        <style>{`
-          @keyframes pulse { 0%{opacity:1} 100%{opacity:0} }
-          @keyframes cardIn { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
-        `}</style>
-
-        {/* ── ヘッダー（固定） ── */}
-        <div style={{ padding: "12px 16px 0", flexShrink: 0 }}>
+      <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", fontFamily: font }}>
+        <div style={{ flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch", padding: "20px 16px" }}>
           <div style={{ maxWidth: 480, margin: "0 auto" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-              <button onClick={() => { setSessionActive(false); setView("home"); }}
-                style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8 }}>
-                ✕ 終了
+            <button onClick={() => setView("log-problem")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← 問題選択</button>
+
+            {/* Problem info */}
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "16px 18px", marginBottom: 12 }}>
+              <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                <span style={{ color: C.accent, fontSize: 11, fontWeight: 700 }}>{BOOK_SHORT[logProblem.book]}</span>
+                <span style={{ color: C.text3, fontSize: 11 }}>{logProblem.number}</span>
+                <RankBadge rank={logProblem.rank} />
+                <ScopeBadge scope={logProblem.scope} />
+              </div>
+              <div style={{ color: C.text, fontSize: 17, fontWeight: 700, lineHeight: 1.5 }}>{logProblem.title}</div>
+              {logProblem.time_min > 0 && <div style={{ color: C.text3, fontSize: 11, marginTop: 4 }}>目安: {logProblem.time_min}分</div>}
+            </div>
+
+            {/* Result buttons */}
+            <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
+              <button onClick={() => setLogResult("○")}
+                style={{ flex: 1, padding: "20px", borderRadius: 14, border: `2px solid ${logResult === "○" ? C.green : C.border}`, background: logResult === "○" ? C.greenDim : C.surface, cursor: "pointer", fontFamily: font, transition: "all 0.15s" }}>
+                <div style={{ fontSize: 28, color: C.green, fontWeight: 700 }}>○</div>
+                <div style={{ color: logResult === "○" ? C.green : C.text3, fontSize: 12, marginTop: 4 }}>正解</div>
               </button>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ color: C.kome, fontSize: 16, fontWeight: 700, fontFamily: "monospace" }}>{fmtTimer(timerElapsed)}</span>
-                <span style={{ color: C.text3, fontSize: 12 }}>{curIdx + 1}/{queue.length}</span>
-              </div>
-            </div>
-            <div style={{ height: 3, background: C.surface3, borderRadius: 2, overflow: "hidden" }}>
-              <div style={{ height: "100%", background: C.kome, borderRadius: 2, width: `${progress}%`, transition: "width 0.4s" }} />
-            </div>
-          </div>
-        </div>
-
-        {/* ── メインコンテンツ（スクロール可能） ── */}
-        <div style={{ flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch", padding: "10px 16px" }}>
-          <div key={curIdx} style={{ maxWidth: 480, margin: "0 auto", animation: "cardIn 0.3s ease" }}>
-
-            {/* 問題ヘッダー */}
-            <div style={{
-              background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14,
-              padding: "16px 18px", marginBottom: 8,
-            }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span style={{ color: C.kome, fontSize: 10, fontWeight: 700, padding: "2px 8px", background: C.komeDim, borderRadius: 4 }}>{curProblem.type || "計算"}</span>
-                  <span style={{ color: C.text3, fontSize: 10 }}>{curProblem.deck}</span>
-                </div>
-                <IntervalBadge intervalIndex={curProblem.intervalIndex} />
-              </div>
-              {curProblem.sources && curProblem.sources.length > 0 && (
-                <div style={{ color: C.text3, fontSize: 11, marginBottom: 6 }}>{curProblem.sources[0]}</div>
-              )}
-              <div style={{ color: C.text, fontSize: 18, fontWeight: 700, lineHeight: 1.6 }}>
-                {curProblem.question}
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
-                <SessionDots count={curSessionKome} />
-                <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}>
-                  <span style={{ color: C.text3, fontSize: 10 }}>累積:</span>
-                  <KomeDots count={curProblem.komeTotal || 0} size={7} max={10} />
-                </div>
-              </div>
+              <button onClick={() => setLogResult("×")}
+                style={{ flex: 1, padding: "20px", borderRadius: 14, border: `2px solid ${logResult === "×" ? C.red : C.border}`, background: logResult === "×" ? C.redDim : C.surface, cursor: "pointer", fontFamily: font, transition: "all 0.15s" }}>
+                <div style={{ fontSize: 28, color: C.red, fontWeight: 700 }}>×</div>
+                <div style={{ color: logResult === "×" ? C.red : C.text3, fontSize: 12, marginTop: 4 }}>不正解</div>
+              </button>
             </div>
 
-            {/* 間違えた箇所（チェックボックス） */}
-            {curProblem.mistakeItems && curProblem.mistakeItems.length > 0 && (
-              <div style={{
-                background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14,
-                padding: "14px 18px", marginBottom: 8,
-              }}>
-                <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 10 }}>間違えた箇所</div>
-                {curProblem.mistakeItems.map((item, i) => (
-                  <label key={i} style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "6px 0", cursor: "pointer" }}>
-                    <input type="checkbox" checked={!!checkedMistakes[item]}
-                      onChange={e => setCheckedMistakes(m => ({ ...m, [item]: e.target.checked }))}
-                      style={{ marginTop: 2, accentColor: C.kome, width: 18, height: 18, flexShrink: 0 }} />
-                    <span style={{ color: C.text2, fontSize: 13, lineHeight: 1.5 }}>{item}</span>
+            {/* Time input */}
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 18px", marginBottom: 12 }}>
+              <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 8 }}>所要時間（分）</div>
+              <input type="number" inputMode="numeric" value={logTime} onChange={e => setLogTime(e.target.value)}
+                placeholder={logProblem.time_min > 0 ? `目安 ${logProblem.time_min}分` : "分"}
+                style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, padding: "10px 14px", fontSize: 16, fontFamily: font, boxSizing: "border-box", outline: "none", textAlign: "center" }} />
+            </div>
+
+            {/* Mistake types (shown when ×) */}
+            {logResult === "×" && (
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 18px", marginBottom: 12 }}>
+                <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 10 }}>間違いの分類（複数可）</div>
+                {mistakeTypes.map(mt => (
+                  <label key={mt.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", cursor: "pointer", borderBottom: `1px solid ${C.border}` }}>
+                    <input type="checkbox" checked={!!logMistakes[mt.id]}
+                      onChange={e => setLogMistakes(m => ({ ...m, [mt.id]: e.target.checked }))}
+                      style={{ accentColor: C.accent, width: 20, height: 20, flexShrink: 0 }} />
+                    <div>
+                      <div style={{ color: C.text, fontSize: 14, fontWeight: 500 }}>{mt.label}</div>
+                      <div style={{ color: C.text3, fontSize: 11 }}>{mt.desc}</div>
+                    </div>
                   </label>
                 ))}
               </div>
             )}
 
-            {/* メモ欄 */}
-            <div style={{
-              background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14,
-              padding: "14px 18px", marginBottom: 8,
-            }}>
-              <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 8 }}>メモ（どう間違えたか）</div>
-              <textarea value={mistakeMemo} onChange={e => setMistakeMemo(e.target.value)}
-                placeholder="自由記述..."
-                style={{ width: "100%", minHeight: 50, background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, padding: "10px 12px", fontSize: 13, fontFamily: font, resize: "vertical", outline: "none", boxSizing: "border-box", lineHeight: 1.5 }} />
+            {/* Memo */}
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 18px", marginBottom: 20 }}>
+              <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 8 }}>メモ</div>
+              <textarea value={logMemo} onChange={e => setLogMemo(e.target.value)}
+                placeholder="どう間違えたか、気づきなど..."
+                style={{ width: "100%", minHeight: 60, background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, padding: "10px 12px", fontSize: 13, fontFamily: font, resize: "vertical", outline: "none", boxSizing: "border-box", lineHeight: 1.5 }} />
             </div>
-
-            {/* 解答・ポイント（折りたたみ） */}
-            <div style={{
-              background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14,
-              overflow: "hidden", marginBottom: 16,
-            }}>
-              <button onClick={() => setShowAns(a => !a)} style={{
-                width: "100%", background: "none", border: "none", padding: "14px 18px",
-                display: "flex", alignItems: "center", justifyContent: "space-between",
-                cursor: "pointer", fontFamily: font,
-              }}>
-                <span style={{ color: C.kome, fontSize: 12, fontWeight: 600 }}>解答・ポイント</span>
-                <span style={{ color: C.text3, fontSize: 14, transform: showAns ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.2s" }}>▼</span>
-              </button>
-              {showAns && (
-                <div style={{ padding: "0 18px 16px", borderTop: `1px solid ${C.border}` }}>
-                  {curProblem.summary && (
-                    <div style={{ marginTop: 12 }}>
-                      <div style={{ color: C.blue, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 6 }}>概要</div>
-                      <div style={{ color: C.text, fontSize: 13, lineHeight: 1.8, whiteSpace: "pre-wrap" }}>{curProblem.summary}</div>
-                    </div>
-                  )}
-                  {curProblem.steps && (
-                    <div style={{ marginTop: 12 }}>
-                      <div style={{ color: C.blue, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 6 }}>計算手順</div>
-                      <div style={{ color: C.text, fontSize: 13, lineHeight: 1.8, whiteSpace: "pre-wrap" }}>{curProblem.steps}</div>
-                    </div>
-                  )}
-                  {curProblem.judgment && (
-                    <div style={{ marginTop: 12 }}>
-                      <div style={{ color: C.blue, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 6 }}>判断ポイント</div>
-                      <div style={{ color: C.text, fontSize: 13, lineHeight: 1.8, whiteSpace: "pre-wrap" }}>{curProblem.judgment}</div>
-                    </div>
-                  )}
-                  {curProblem.mistakes && (
-                    <div style={{ marginTop: 12 }}>
-                      <div style={{ color: C.red, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 6 }}>間違えやすいポイント</div>
-                      <div style={{ color: C.text, fontSize: 13, lineHeight: 1.8, whiteSpace: "pre-wrap" }}>{curProblem.mistakes}</div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
           </div>
         </div>
 
-        {/* ── 正解/不正解ボタン（画面下部に固定） ── */}
+        {/* Submit button (fixed at bottom) */}
         <div style={{ padding: "10px 16px 14px", flexShrink: 0, background: C.bg, borderTop: `1px solid ${C.border}` }}>
-          <div style={{ maxWidth: 480, margin: "0 auto", display: "flex", gap: 12 }}>
-            <Btn onClick={() => handleAnswer(false)} bg={C.redDim} color={C.red}
-              style={{ flex: 1, border: `1px solid ${C.red}40`, padding: "16px" }}>✕ 不正解</Btn>
-            <Btn onClick={() => handleAnswer(true)} bg={C.greenDim} color={C.green}
-              style={{ flex: 1, border: `1px solid ${C.green}40`, padding: "16px" }}>○ 正解</Btn>
+          <div style={{ maxWidth: 480, margin: "0 auto" }}>
+            <Btn onClick={submitAttempt} disabled={!canSubmit}
+              bg={canSubmit ? C.accent : C.surface3} color={canSubmit ? "#fff" : C.text3}
+              style={{ width: "100%", padding: "16px", fontSize: 16 }}>記録する</Btn>
           </div>
         </div>
       </div>
     );
   }
 
-  // ═══════ HISTORY MODAL ═══════
-  if (historyView) {
-    const p = problems.find(pr => pr.id === historyView);
-    if (!p) { setHistoryView(null); return null; }
+  // ═══════ TOPICS: Category List ═══════
+  if (view === "topics-cat") {
+    const catCounts = {};
+    topics.forEach(t => { catCounts[t.category] = (catCounts[t.category] || 0) + 1; });
+    const catList = topicCategories.length > 0 ? topicCategories : Object.keys(catCounts).sort();
+    const totalTopics = topics.length;
+
     return (
       <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
-        <div style={{ maxWidth: 540, margin: "0 auto" }}>
-          <button onClick={() => setHistoryView(null)}
-            style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 12 }}>
-            ← 戻る
-          </button>
+        <div style={{ maxWidth: 480, margin: "0 auto" }}>
+          <button onClick={() => setView("home")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← 戻る</button>
+          <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 4px" }}>論点学習</h2>
+          <div style={{ color: C.text3, fontSize: 11, marginBottom: 16 }}>{totalTopics}件の論点ノート</div>
 
-          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: "20px" }}>
-            <div style={{ color: C.text, fontSize: 16, fontWeight: 600, lineHeight: 1.5, marginBottom: 12 }}>{p.question}</div>
-            {p.answer && <div style={{ color: C.text3, fontSize: 13, marginBottom: 16, padding: "10px 14px", background: C.surface2, borderRadius: 8 }}>{p.answer}</div>}
+          {/* Search */}
+          <input type="search" value={topicSearch} onChange={e => { setTopicSearch(e.target.value); if (e.target.value.trim()) setView("topics-search"); }}
+            placeholder="キーワードで検索..."
+            style={{ width: "100%", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, color: C.text, padding: "12px 16px", fontSize: 14, fontFamily: font, boxSizing: "border-box", outline: "none", marginBottom: 12 }} />
 
-            <div style={{ display: "flex", gap: 16, marginBottom: 20, flexWrap: "wrap" }}>
-              <div>
-                <span style={{ color: C.text3, fontSize: 11 }}>累積コメ</span>
-                <div style={{ marginTop: 4 }}><KomeDots count={p.komeTotal || 0} size={10} max={20} /></div>
-              </div>
-              <div>
-                <span style={{ color: C.text3, fontSize: 11 }}>ステージ</span>
-                <div style={{ marginTop: 4 }}><IntervalBadge intervalIndex={p.intervalIndex} /></div>
-              </div>
-              <div>
-                <span style={{ color: C.text3, fontSize: 11 }}>次回復習</span>
-                <div style={{ color: C.text2, fontSize: 13, marginTop: 4 }}>{p.graduated ? "卒業済み" : (p.nextReview || "未定")}</div>
-              </div>
-            </div>
-
-            <div style={{ color: C.text3, fontSize: 11, fontWeight: 600, letterSpacing: 1, marginBottom: 10 }}>解答履歴</div>
-            {(!p.history || p.history.length === 0) ? (
-              <div style={{ color: C.text3, fontSize: 13, padding: 20, textAlign: "center" }}>まだ履歴がありません</div>
-            ) : (
-              <div style={{ maxHeight: 400, overflowY: "auto" }}>
-                {p.history.map((h, i) => (
-                  <div key={i} style={{
-                    display: "flex", alignItems: "center", gap: 12, padding: "8px 0",
-                    borderBottom: i < p.history.length - 1 ? `1px solid ${C.border}` : "none",
-                  }}>
-                    <span style={{ color: C.text3, fontSize: 12, minWidth: 56, fontFamily: "monospace" }}>{fmtDate(h.date)}</span>
-                    <span style={{
-                      fontSize: 16, color: h.result === "○" ? C.green : C.red,
-                      width: 24, textAlign: "center",
-                    }}>{h.result}</span>
-                    <KomeDots count={h.komeTotal} size={6} max={16} />
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {p.history && p.history.length > 1 && (
-              <div style={{ marginTop: 16 }}>
-                <div style={{ color: C.text3, fontSize: 11, fontWeight: 600, letterSpacing: 1, marginBottom: 8 }}>コメ推移</div>
-                <div style={{ background: C.surface2, borderRadius: 8, padding: "12px 16px" }}>
-                  {p.history.map((h, i) => {
-                    const barW = Math.min((h.komeTotal / Math.max(...p.history.map(x => x.komeTotal), 1)) * 100, 100);
-                    return (
-                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                        <span style={{ color: C.text3, fontSize: 9, minWidth: 36, fontFamily: "monospace" }}>{fmtDate(h.date)}</span>
-                        <div style={{ flex: 1, height: 8, background: C.surface3, borderRadius: 4, overflow: "hidden" }}>
-                          <div style={{
-                            height: "100%", borderRadius: 4, width: `${barW}%`,
-                            background: h.result === "×" ? C.kome : C.green, transition: "width 0.3s",
-                          }} />
-                        </div>
-                        <span style={{ color: C.text3, fontSize: 9, minWidth: 16 }}>{h.komeTotal}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // ═══════ EXPORT ═══════
-  if (exportText !== null) {
-    return (
-      <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
-        <div style={{ maxWidth: 600, margin: "0 auto" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-            <button onClick={() => setExportText(null)}
-              style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8 }}>
-              ← 戻る
-            </button>
-            <button onClick={() => { navigator.clipboard?.writeText(exportText); flash("correct"); }}
-              style={{
-                background: C.kome, color: "#fff", border: "none", borderRadius: 8,
-                padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: font,
-              }}>
-              コピー
-            </button>
-          </div>
-          <div style={{ color: C.text2, fontSize: 12, marginBottom: 8 }}>
-            以下をObsidian Vaultにペーストまたはスクリプトで書き込み
-          </div>
-          <pre style={{
-            background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10,
-            padding: 16, color: C.text2, fontSize: 11, lineHeight: 1.6,
-            overflow: "auto", maxHeight: "70vh", whiteSpace: "pre-wrap", fontFamily: "monospace",
-          }}>{exportText}</pre>
-        </div>
-      </div>
-    );
-  }
-
-  // ═══════ MANAGE ═══════
-  if (view === "manage") {
-    return (
-      <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
-        <style>{`@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}`}</style>
-        <div style={{ maxWidth: 540, margin: "0 auto" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-            <button onClick={() => setView("home")}
-              style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8 }}>← 戻る</button>
-            <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: 0 }}>問題管理</h2>
-            <div style={{ width: 50 }} />
-          </div>
-
-          <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
-            <button onClick={() => setDeckFilter("all")}
-              style={{ background: deckFilter === "all" ? C.kome : C.surface2, color: deckFilter === "all" ? "#fff" : C.text3, border: "none", borderRadius: 20, padding: "5px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: font }}>
-              すべて ({problems.length})
-            </button>
-            {decks.map(d => {
-              const cnt = problems.filter(p => p.deck === d).length;
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {catList.map(cat => {
+              const count = catCounts[cat] || 0;
               return (
-                <button key={d} onClick={() => setDeckFilter(d)}
-                  style={{ background: deckFilter === d ? C.kome : C.surface2, color: deckFilter === d ? "#fff" : C.text3, border: "none", borderRadius: 20, padding: "5px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: font }}>
-                  {d} ({cnt})
+                <button key={cat} onClick={() => { setTopicCat(cat); setView("topics-list"); }}
+                  style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: "16px 20px", cursor: "pointer", fontFamily: font, textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ color: C.text, fontSize: 15, fontWeight: 600 }}>{cat}</span>
+                  <span style={{ color: C.accent, fontSize: 14, fontWeight: 700 }}>{count}</span>
                 </button>
               );
             })}
           </div>
+        </div>
+      </div>
+    );
+  }
 
-          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 14 }}>
-            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-              <button onClick={() => setBulkMode(false)}
-                style={{ background: !bulkMode ? C.kome : C.surface2, color: !bulkMode ? "#fff" : C.text3, border: "none", borderRadius: 8, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: font, flex: 1 }}>個別追加</button>
-              <button onClick={() => setBulkMode(true)}
-                style={{ background: bulkMode ? C.kome : C.surface2, color: bulkMode ? "#fff" : C.text3, border: "none", borderRadius: 8, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: font, flex: 1 }}>一括追加</button>
-            </div>
+  // ═══════ TOPICS: Search Results ═══════
+  if (view === "topics-search") {
+    const q = topicSearch.trim().toLowerCase();
+    const filtered = q ? topics.filter(t =>
+      (t.display_name || t.topic || "").toLowerCase().includes(q) ||
+      (t.summary || "").toLowerCase().includes(q) ||
+      (t.keywords || []).some(k => k.toLowerCase().includes(q)) ||
+      (t.category || "").toLowerCase().includes(q) ||
+      (t.subcategory || "").toLowerCase().includes(q)
+    ) : [];
 
-            <div style={{ marginBottom: 10 }}>
-              <div style={{ color: C.text3, fontSize: 11, marginBottom: 4 }}>デッキ</div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {decks.map(d => (
-                  <button key={d} onClick={() => setNewDeck(d)}
-                    style={{ background: newDeck === d ? C.blueDim : C.surface3, color: newDeck === d ? C.blue : C.text3, border: `1px solid ${newDeck === d ? C.blue + "40" : C.border}`, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer", fontFamily: font }}>
-                    {d}
-                  </button>
-                ))}
-                <input placeholder="+ 新規" style={{ background: C.surface3, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "3px 8px", fontSize: 11, fontFamily: font, width: 80, outline: "none" }}
-                  onKeyDown={e => { if (e.key === "Enter" && e.target.value.trim()) { const nd = e.target.value.trim(); if (!decks.includes(nd)) setDecks(p => [...p, nd]); setNewDeck(nd); e.target.value = ""; } }} />
-              </div>
-            </div>
-
-            {!bulkMode ? (
-              <>
-                <input value={newQ} onChange={e => setNewQ(e.target.value)} placeholder="問題文"
-                  style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, padding: "10px 14px", fontSize: 14, fontFamily: font, marginBottom: 8, boxSizing: "border-box", outline: "none" }}
-                  onKeyDown={e => { if (e.key === "Enter") document.getElementById("ai2")?.focus(); }} />
-                <input id="ai2" value={newA} onChange={e => setNewA(e.target.value)} placeholder="解答（任意）"
-                  style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, padding: "10px 14px", fontSize: 14, fontFamily: font, marginBottom: 10, boxSizing: "border-box", outline: "none" }}
-                  onKeyDown={e => { if (e.key === "Enter") addProblem(); }} />
-                <Btn onClick={addProblem} disabled={!newQ.trim()} bg={newQ.trim() ? C.kome : C.surface3} color={newQ.trim() ? "#fff" : C.text3} style={{ width: "100%" }}>追加</Btn>
-              </>
-            ) : (
-              <>
-                <textarea value={bulkText} onChange={e => setBulkText(e.target.value)}
-                  placeholder={"1行1問（TAB or | で問題と解答を区切る）\n減価償却の意義\t固定資産の…"}
-                  style={{ width: "100%", minHeight: 100, background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, padding: "10px 14px", fontSize: 13, fontFamily: font, marginBottom: 10, boxSizing: "border-box", resize: "vertical", outline: "none", lineHeight: 1.6 }} />
-                <Btn onClick={addBulk} disabled={!bulkText.trim()} bg={bulkText.trim() ? C.kome : C.surface3} color={bulkText.trim() ? "#fff" : C.text3} style={{ width: "100%" }}>一括追加</Btn>
-              </>
-            )}
-          </div>
-
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {filteredProblems.length === 0 && (
-              <div style={{ color: C.text3, textAlign: "center", padding: 40, fontSize: 14 }}>問題がありません</div>
-            )}
-            {filteredProblems.map(p => (
-              <div key={p.id} style={{
-                background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10,
-                padding: "12px 16px", opacity: p.graduated ? 0.6 : 1,
-              }}>
-                {editId === p.id ? (
-                  <div>
-                    <input value={editQ} onChange={e => setEditQ(e.target.value)}
-                      style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "8px 10px", fontSize: 13, fontFamily: font, marginBottom: 6, boxSizing: "border-box", outline: "none" }} />
-                    <input value={editA} onChange={e => setEditA(e.target.value)}
-                      style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "8px 10px", fontSize: 13, fontFamily: font, marginBottom: 8, boxSizing: "border-box", outline: "none" }} />
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <Btn onClick={() => { setProblems(prev => prev.map(x => x.id === p.id ? { ...x, question: editQ, answer: editA } : x)); setEditId(null); }}
-                        bg={C.kome} color="#fff" style={{ padding: "6px 16px", fontSize: 12 }}>保存</Btn>
-                      <Btn onClick={() => setEditId(null)} bg={C.surface3} color={C.text3} style={{ padding: "6px 16px", fontSize: 12 }}>取消</Btn>
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
-                      <div style={{ flex: 1, cursor: "pointer" }} onClick={() => setHistoryView(p.id)}>
-                        <div style={{ color: C.text, fontSize: 13, fontWeight: 500, lineHeight: 1.5 }}>{p.question}</div>
-                        {p.answer && <div style={{ color: C.text3, fontSize: 12, marginTop: 2 }}>{p.answer}</div>}
-                      </div>
-                      <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-                        <button onClick={() => { setEditId(p.id); setEditQ(p.question); setEditA(p.answer || ""); }}
-                          style={{ background: "none", border: "none", color: C.text3, cursor: "pointer", fontSize: 14, padding: 4 }}>✏</button>
-                        <button onClick={() => setProblems(prev => prev.filter(x => x.id !== p.id))}
-                          style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 14, padding: 4, opacity: 0.5 }}>✕</button>
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-                      <KomeDots count={p.komeTotal || 0} size={7} max={12} />
-                      <IntervalBadge intervalIndex={p.intervalIndex} />
-                      {p.graduated && <span style={{ color: C.green, fontSize: 10, fontWeight: 600 }}>✓ 卒業</span>}
-                      <span style={{ color: C.text3, fontSize: 10, marginLeft: "auto" }}>{p.deck}</span>
-                    </div>
-                  </div>
-                )}
-              </div>
+    return (
+      <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
+        <div style={{ maxWidth: 480, margin: "0 auto" }}>
+          <button onClick={() => { setTopicSearch(""); setView("topics-cat"); }} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← カテゴリ</button>
+          <input type="search" value={topicSearch} onChange={e => setTopicSearch(e.target.value)} autoFocus
+            placeholder="キーワードで検索..."
+            style={{ width: "100%", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, color: C.text, padding: "12px 16px", fontSize: 14, fontFamily: font, boxSizing: "border-box", outline: "none", marginBottom: 12 }} />
+          <div style={{ color: C.text3, fontSize: 11, marginBottom: 12 }}>{filtered.length}件</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {filtered.slice(0, 50).map(t => (
+              <button key={t.topic_id} onClick={() => { setTopicItem(t); setView("topics-detail"); }}
+                style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 16px", cursor: "pointer", fontFamily: font, textAlign: "left" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                  <span style={{ color: C.text, fontSize: 13, fontWeight: 600, flex: 1 }}>{t.display_name || t.topic}</span>
+                  <StatusBadge status={t.status} />
+                  <RankBadge rank={t.importance} />
+                </div>
+                <div style={{ color: C.text3, fontSize: 11 }}>{t.category} / {t.subcategory}</div>
+              </button>
             ))}
           </div>
         </div>
@@ -1180,49 +1005,395 @@ function KomeKomeV2() {
     );
   }
 
+  // ═══════ TOPICS: Topic List (by category) ═══════
+  if (view === "topics-list" && topicCat) {
+    const catTopics = topics.filter(t => t.category === topicCat)
+      .sort((a, b) => {
+        // Sort: importance A > B > C, then by display_name
+        const rankOrder = { A: 0, B: 1, C: 2 };
+        const ra = rankOrder[a.importance] ?? 3;
+        const rb = rankOrder[b.importance] ?? 3;
+        if (ra !== rb) return ra - rb;
+        return (a.display_name || a.topic).localeCompare(b.display_name || b.topic, "ja");
+      });
+
+    return (
+      <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
+        <div style={{ maxWidth: 480, margin: "0 auto" }}>
+          <button onClick={() => setView("topics-cat")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← カテゴリ</button>
+          <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 4px" }}>{topicCat}</h2>
+          <div style={{ color: C.text3, fontSize: 11, marginBottom: 16 }}>{catTopics.length}件</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {catTopics.map(t => (
+              <button key={t.topic_id} onClick={() => { setTopicItem(t); setView("topics-detail"); }}
+                style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 16px", cursor: "pointer", fontFamily: font, textAlign: "left" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                  <span style={{ color: C.text, fontSize: 13, fontWeight: 600, flex: 1 }}>{t.display_name || t.topic}</span>
+                  <StatusBadge status={t.status} />
+                  <RankBadge rank={t.importance} />
+                </div>
+                <div style={{ color: C.text3, fontSize: 11 }}>
+                  {t.subcategory && <span>{t.subcategory}</span>}
+                  {t.kome_total > 0 && <span style={{ marginLeft: 8 }}>米{t.kome_total}</span>}
+                  {t.keywords && t.keywords.length > 0 && <span style={{ marginLeft: 8 }}>{t.keywords.slice(0, 3).join(", ")}</span>}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════ TOPICS: Detail View ═══════
+  if (view === "topics-detail" && topicItem) {
+    const t = topicItem;
+    const sections = [
+      { key: "summary", title: "概要", icon: "S", color: C.blue },
+      { key: "steps", title: "計算手順", icon: "C", color: C.accent },
+      { key: "judgment", title: "判断ポイント", icon: "J", color: C.green },
+      { key: "mistakes", title: "間違えやすいポイント", icon: "!", color: C.red },
+    ];
+
+    return (
+      <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
+        <div style={{ maxWidth: 480, margin: "0 auto" }}>
+          <button onClick={() => setView(topicCat ? "topics-list" : "topics-search")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← 戻る</button>
+
+          {/* Header */}
+          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "16px 18px", marginBottom: 12 }}>
+            <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+              <span style={{ color: C.accent, fontSize: 11, fontWeight: 600 }}>{t.category}</span>
+              {t.subcategory && <span style={{ color: C.text3, fontSize: 11 }}>/ {t.subcategory}</span>}
+              <RankBadge rank={t.importance} />
+              <StatusBadge status={t.status} />
+            </div>
+            <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 8px", lineHeight: 1.4 }}>{t.display_name || t.topic}</h2>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+              {t.conditions && t.conditions.length > 0 && t.conditions.map(c => (
+                <span key={c} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 4, background: C.surface2, color: C.text2 }}>{c}</span>
+              ))}
+              {t.keywords && t.keywords.length > 0 && t.keywords.map(k => (
+                <span key={k} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 4, background: C.blueDim, color: C.blue }}>{k}</span>
+              ))}
+            </div>
+          </div>
+
+          {/* Sections */}
+          {sections.map(sec => {
+            const content = t[sec.key];
+            if (!content) return null;
+            return (
+              <div key={sec.key} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "16px 18px", marginBottom: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                  <span style={{ width: 24, height: 24, borderRadius: 6, background: `${sec.color}20`, color: sec.color, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>{sec.icon}</span>
+                  <span style={{ color: C.text, fontSize: 14, fontWeight: 700 }}>{sec.title}</span>
+                </div>
+                <SectionContent text={content} />
+              </div>
+            );
+          })}
+
+          {/* Mistake items (if any) */}
+          {t.mistake_items && t.mistake_items.length > 0 && (
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "16px 18px", marginBottom: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                <span style={{ width: 24, height: 24, borderRadius: 6, background: `${C.red}20`, color: C.red, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>X</span>
+                <span style={{ color: C.text, fontSize: 14, fontWeight: 700 }}>よくある間違い</span>
+              </div>
+              {t.mistake_items.map((m, i) => (
+                <div key={i} style={{ padding: "8px 0", borderBottom: i < t.mistake_items.length - 1 ? `1px solid ${C.border}` : "none" }}>
+                  <div style={{ color: C.red, fontSize: 12, fontWeight: 700, marginBottom: 2 }}>{m.wrong}</div>
+                  <div style={{ color: C.green, fontSize: 12 }}>{m.correct}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════ TODAY: Problem List ═══════
+  if (view === "today" && todayData) {
+    const tdTopics = todayData.topics || [];
+    // Track which problems have been attempted today
+    const todayAttemptIds = new Set(todayAttempts.map(a => a.problem_id));
+
+    return (
+      <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
+        <div style={{ maxWidth: 480, margin: "0 auto" }}>
+          <button onClick={() => setView("home")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← 戻る</button>
+          <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 4px" }}>今日の問題</h2>
+          <div style={{ color: C.text3, fontSize: 11, marginBottom: 16 }}>
+            {todayData.generated_date} / {todayData.total_topics}論点 {todayData.total_problems}問
+          </div>
+
+          {tdTopics.length === 0 ? (
+            <div style={{ color: C.text3, textAlign: "center", padding: 40, fontSize: 14 }}>今日の問題はありません</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {tdTopics.map(topic => (
+                <div key={topic.topic_id} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 16px" }}>
+                  {/* Topic header */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+                    <span style={{ color: C.text, fontSize: 14, fontWeight: 700, flex: 1 }}>{topic.topic_name}</span>
+                    <ReasonBadge reason={topic.reason} />
+                    <RankBadge rank={topic.importance} />
+                  </div>
+                  <div style={{ color: C.text3, fontSize: 10, marginBottom: 10 }}>
+                    {topic.category} / 間隔Lv.{topic.interval_index}
+                  </div>
+
+                  {/* Problems under this topic */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {(topic.problems || []).map(prob => {
+                      const done = todayAttemptIds.has(prob.problem_id);
+                      const pa = attempts.filter(a => a.problem_id === prob.problem_id);
+                      const lastResult = pa.length > 0 ? pa[0].result : null;
+                      return (
+                        <button key={prob.problem_id} onClick={() => {
+                          setTodayProblem(prob); setTodayTopicCtx(topic);
+                          setPageViewStep("view"); setPvMistakes({}); setPvTime("");
+                          setView("page-view");
+                        }}
+                          style={{ background: done ? C.surface2 : C.surface3, border: `1px solid ${done ? C.border : C.border}`, borderRadius: 10, padding: "10px 14px", cursor: "pointer", fontFamily: font, textAlign: "left", display: "flex", alignItems: "center", gap: 10, opacity: done ? 0.7 : 1 }}>
+                          <div style={{ minWidth: 30, textAlign: "center" }}>
+                            {done ? (
+                              <span style={{ color: lastResult === "○" ? C.green : C.red, fontSize: 16, fontWeight: 700 }}>{lastResult}</span>
+                            ) : (
+                              <span style={{ color: C.text3, fontSize: 11 }}>{prob.number?.replace(/^問題\s*/, "") || "-"}</span>
+                            )}
+                          </div>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ color: C.text, fontSize: 12, fontWeight: 500, lineHeight: 1.4 }}>{prob.title || `${BOOK_SHORT[prob.book] || prob.book} ${prob.number}`}</div>
+                            <div style={{ display: "flex", gap: 6, marginTop: 3, alignItems: "center" }}>
+                              <span style={{ color: C.accent, fontSize: 10 }}>{BOOK_SHORT[prob.book] || prob.book}</span>
+                              <RankBadge rank={prob.rank} />
+                              {prob.type && <span style={{ color: C.text3, fontSize: 9 }}>{prob.type}</span>}
+                              {prob.time_min > 0 && <span style={{ color: C.text3, fontSize: 9 }}>{prob.time_min}分</span>}
+                            </div>
+                          </div>
+                          {prob.page_image_key && (
+                            <span style={{ color: C.blue, fontSize: 10, flexShrink: 0 }}>📄</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════ PAGE VIEW: PDF Image + Result Entry ═══════
+  if (view === "page-view" && todayProblem) {
+    const mistakeTypes = getMistakeTypes(todayProblem.type || "計算");
+    const imageUrl = todayProblem.page_image_key
+      ? `${apiBase(apiUrl)}/api/komekome/page-image/${todayProblem.page_image_key}`
+      : null;
+
+    // Step: "view" = show image + ○/×, "mistakes" = show mistake selection for ×
+    if (pageViewStep === "mistakes") {
+      return (
+        <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", fontFamily: font }}>
+          <div style={{ flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch", padding: "20px 16px" }}>
+            <div style={{ maxWidth: 480, margin: "0 auto" }}>
+              <button onClick={() => setPageViewStep("view")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← 戻る</button>
+              <div style={{ color: C.red, fontSize: 18, fontWeight: 700, textAlign: "center", marginBottom: 12 }}>× 不正解</div>
+              <div style={{ color: C.text2, fontSize: 13, textAlign: "center", marginBottom: 16 }}>{todayProblem.title || `${BOOK_SHORT[todayProblem.book]} ${todayProblem.number}`}</div>
+
+              {/* Time input */}
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 18px", marginBottom: 12 }}>
+                <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 8 }}>所要時間（分）</div>
+                <input type="number" inputMode="numeric" value={pvTime} onChange={e => setPvTime(e.target.value)}
+                  placeholder={todayProblem.time_min > 0 ? `目安 ${todayProblem.time_min}分` : "分"}
+                  style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, padding: "10px 14px", fontSize: 16, fontFamily: font, boxSizing: "border-box", outline: "none", textAlign: "center" }} />
+              </div>
+
+              {/* Mistake types */}
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 18px", marginBottom: 20 }}>
+                <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 10 }}>間違いの分類（複数可）</div>
+                {mistakeTypes.map(mt => (
+                  <label key={mt.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", cursor: "pointer", borderBottom: `1px solid ${C.border}` }}>
+                    <input type="checkbox" checked={!!pvMistakes[mt.id]}
+                      onChange={e => setPvMistakes(m => ({ ...m, [mt.id]: e.target.checked }))}
+                      style={{ accentColor: C.accent, width: 20, height: 20, flexShrink: 0 }} />
+                    <div>
+                      <div style={{ color: C.text, fontSize: 14, fontWeight: 500 }}>{mt.label}</div>
+                      <div style={{ color: C.text3, fontSize: 11 }}>{mt.desc}</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div style={{ padding: "10px 16px 14px", flexShrink: 0, background: C.bg, borderTop: `1px solid ${C.border}` }}>
+            <div style={{ maxWidth: 480, margin: "0 auto" }}>
+              <Btn onClick={() => submitPageViewAttempt("×")} bg={C.red} color="#fff" style={{ width: "100%", padding: "16px", fontSize: 16 }}>記録する</Btn>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Default: pageViewStep === "view"
+    return (
+      <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", fontFamily: font }}>
+        <div style={{ flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch", padding: "20px 16px" }}>
+          <div style={{ maxWidth: 480, margin: "0 auto" }}>
+            <button onClick={() => { resetPageView(); setView("today"); }} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← 今日の問題</button>
+
+            {/* Problem info */}
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 16px", marginBottom: 12 }}>
+              <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}>
+                <span style={{ color: C.accent, fontSize: 11, fontWeight: 700 }}>{BOOK_SHORT[todayProblem.book] || todayProblem.book}</span>
+                <span style={{ color: C.text3, fontSize: 11 }}>{todayProblem.number}</span>
+                <RankBadge rank={todayProblem.rank} />
+              </div>
+              <div style={{ color: C.text, fontSize: 15, fontWeight: 700, lineHeight: 1.4 }}>{todayProblem.title || "問題"}</div>
+              {todayTopicCtx && <div style={{ color: C.text3, fontSize: 10, marginTop: 4 }}>{todayTopicCtx.topic_name} / {todayTopicCtx.reason}</div>}
+            </div>
+
+            {/* PDF page image */}
+            {imageUrl ? (
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 8, marginBottom: 12, touchAction: "pinch-zoom", overflow: "auto", WebkitOverflowScrolling: "touch" }}>
+                <AuthImage src={imageUrl} token={apiToken} alt={`${todayProblem.book} p.${todayProblem.page}`} />
+              </div>
+            ) : (
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "40px 16px", marginBottom: 12, textAlign: "center" }}>
+                <div style={{ color: C.text3, fontSize: 13 }}>ページ画像なし</div>
+                <div style={{ color: C.text3, fontSize: 11, marginTop: 4 }}>p.{todayProblem.page || "-"}</div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* ○/× buttons fixed at bottom */}
+        <div style={{ padding: "10px 16px 14px", flexShrink: 0, background: C.bg, borderTop: `1px solid ${C.border}` }}>
+          <div style={{ maxWidth: 480, margin: "0 auto", display: "flex", gap: 12 }}>
+            <button onClick={() => submitPageViewAttempt("○")}
+              style={{ flex: 1, padding: "18px", borderRadius: 14, border: `2px solid ${C.green}`, background: C.greenDim, cursor: "pointer", fontFamily: font }}>
+              <div style={{ fontSize: 28, color: C.green, fontWeight: 700 }}>○</div>
+              <div style={{ color: C.green, fontSize: 12, marginTop: 2 }}>正解</div>
+            </button>
+            <button onClick={() => setPageViewStep("mistakes")}
+              style={{ flex: 1, padding: "18px", borderRadius: 14, border: `2px solid ${C.red}`, background: C.redDim, cursor: "pointer", fontFamily: font }}>
+              <div style={{ fontSize: 28, color: C.red, fontWeight: 700 }}>×</div>
+              <div style={{ color: C.red, fontSize: 12, marginTop: 2 }}>不正解</div>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════ STATS ═══════
+  if (view === "stats") {
+    return <StatsView attempts={attempts} problems={problems} problemList={problemList} onBack={() => setView("home")} />;
+  }
+
+  // ═══════ HISTORY ═══════
+  if (view === "history") {
+    const recentAttempts = attempts.slice(0, 100);
+    return (
+      <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
+        <div style={{ maxWidth: 480, margin: "0 auto" }}>
+          <button onClick={() => setView("home")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 12 }}>← 戻る</button>
+          <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 16px" }}>記録履歴</h2>
+          {recentAttempts.length === 0 ? (
+            <div style={{ color: C.text3, textAlign: "center", padding: 40 }}>まだ記録がありません</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {recentAttempts.map(a => {
+                const p = problems[a.problem_id];
+                return (
+                  <div key={a.id} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 14px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                      <span style={{ color: a.result === "○" ? C.green : C.red, fontSize: 18, fontWeight: 700, width: 24 }}>{a.result}</span>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ color: C.text, fontSize: 13, fontWeight: 500, lineHeight: 1.3 }}>{p ? p.title : a.problem_id}</div>
+                        <div style={{ color: C.text3, fontSize: 10, marginTop: 2 }}>
+                          {p ? BOOK_SHORT[p.book] || p.book : ""} {p ? p.number : ""}
+                          {a.time_min > 0 && ` / ${a.time_min}分`}
+                        </div>
+                      </div>
+                      <span style={{ color: C.text3, fontSize: 10, flexShrink: 0 }}>{a.date.slice(5)}</span>
+                    </div>
+                    {a.mistakes && a.mistakes.length > 0 && (
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginLeft: 32 }}>
+                        {a.mistakes.map(m => (
+                          <span key={m} style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: C.redDim, color: C.red }}>{m}</span>
+                        ))}
+                      </div>
+                    )}
+                    {a.memo && <div style={{ color: C.text3, fontSize: 11, marginLeft: 32, marginTop: 4 }}>{a.memo}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   // ═══════ HOME ═══════
+  const todayCorrect = todayAttempts.filter(a => a.result === "○").length;
+  const todayWrong = todayAttempts.filter(a => a.result === "×").length;
+  const todayRate = todayAttempts.length > 0 ? Math.round(todayCorrect / todayAttempts.length * 100) : null;
+
   return (
     <div style={{ background: C.bg, minHeight: "100vh", padding: "36px 16px", fontFamily: font }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;600;700&display=swap');
         @keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
       `}</style>
-
       <div style={{ maxWidth: 480, margin: "0 auto" }}>
-        <div style={{ textAlign: "center", marginBottom: 32, animation: "fadeUp 0.5s ease" }}>
-          <div style={{ display: "flex", justifyContent: "center", gap: 3, marginBottom: 8 }}>
-            {[1, 2, 3, 4].map(i => <div key={i} style={{ width: 8, height: 8, borderRadius: 2, background: C.kome }} />)}
-          </div>
-          <h1 style={{ color: C.text, fontSize: 24, fontWeight: 700, margin: 0 }}>コメコメ暗記 v2</h1>
-          <p style={{ color: C.text3, fontSize: 12, marginTop: 4 }}>廣升式 記憶曲線メソッド</p>
+        {/* Header */}
+        <div style={{ textAlign: "center", marginBottom: 24, animation: "fadeUp 0.5s ease" }}>
+          <h1 style={{ color: C.text, fontSize: 22, fontWeight: 700, margin: 0 }}>演習記録</h1>
+          <p style={{ color: C.text3, fontSize: 12, marginTop: 4 }}>法人税法 問題演習トラッカー</p>
           {apiToken && (
-            <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 6, marginTop: 8 }}>
-              <div style={{
-                width: 6, height: 6, borderRadius: "50%",
-                background: syncStatus === "synced" ? C.green : syncStatus === "error" ? C.red : syncStatus === "syncing" ? C.blue : syncStatus === "offline" ? C.kome : C.text3,
-              }} />
-              <span style={{ color: C.text3, fontSize: 10 }}>
-                {syncStatus === "synced" ? "Synced" : syncStatus === "error" ? "Error" : syncStatus === "syncing" ? "Syncing..." : syncStatus === "offline" ? "Offline" : ""}
-                {syncMsg ? ` (${syncMsg})` : ""}
-              </span>
+            <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 6, marginTop: 6 }}>
+              <div style={{ width: 6, height: 6, borderRadius: "50%", background: syncStatus === "synced" ? C.green : syncStatus === "error" ? C.red : C.text3 }} />
+              <span style={{ color: C.text3, fontSize: 10 }}>{syncStatus === "synced" ? "Synced" : syncStatus === "offline" ? "Offline" : syncStatus === "error" ? "Error" : ""}</span>
             </div>
           )}
         </div>
 
+        {/* Main CTA */}
         <div style={{ animation: "fadeUp 0.5s ease 0.05s both" }}>
-          <Btn onClick={startSession} disabled={dueCount === 0}
-            bg={dueCount > 0 ? C.kome : C.surface3} color={dueCount > 0 ? "#fff" : C.text3}
-            style={{ width: "100%", padding: "18px", fontSize: 17, borderRadius: 14, boxShadow: dueCount > 0 ? `0 4px 24px ${C.kome}30` : "none" }}>
-            {dueCount > 0 ? `学習を開始（${dueCount}問）` : "今日の学習は完了 🎉"}
+          <Btn onClick={() => { resetLog(); setView("log-book"); }}
+            bg={C.accent} color="#fff"
+            style={{ width: "100%", padding: "18px", fontSize: 17, borderRadius: 14, boxShadow: `0 4px 24px ${C.accent}30` }}>
+            記録する
           </Btn>
         </div>
 
+        {/* Today's problems CTA */}
+        {todayData && todayData.topics && todayData.topics.length > 0 && (
+          <div style={{ marginTop: 12, animation: "fadeUp 0.5s ease 0.07s both" }}>
+            <Btn onClick={() => setView("today")}
+              bg={C.surface} color={C.accent}
+              style={{ width: "100%", padding: "16px", fontSize: 15, border: `1px solid ${C.accent}40`, borderRadius: 14, display: "flex", justifyContent: "center", alignItems: "center", gap: 10 }}>
+              <span>今日の問題</span>
+              <span style={{ background: C.accent, color: "#fff", fontSize: 12, fontWeight: 700, padding: "2px 8px", borderRadius: 10 }}>{todayData.total_problems}</span>
+            </Btn>
+          </div>
+        )}
+
+        {/* Today's stats */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, marginTop: 16, animation: "fadeUp 0.5s ease 0.1s both" }}>
           {[
-            { v: dueCount, l: "今日の対象", c: C.kome },
-            { v: totalKome, l: "総コメ数", c: C.kome },
-            { v: graduatedCount, l: "卒業", c: C.green },
-            { v: problems.length, l: "全問題", c: C.text2 },
+            { v: todayAttempts.length, l: "今日", c: C.accent },
+            { v: todayCorrect, l: "正解", c: C.green },
+            { v: todayWrong, l: "不正解", c: C.red },
+            { v: todayRate !== null ? `${todayRate}%` : "-", l: "正答率", c: todayRate >= 80 ? C.green : todayRate >= 60 ? C.blue : todayRate !== null ? C.red : C.text3 },
           ].map((s, i) => (
             <div key={i} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 8px", textAlign: "center" }}>
               <div style={{ color: s.c, fontSize: 22, fontWeight: 700 }}>{s.v}</div>
@@ -1231,47 +1402,50 @@ function KomeKomeV2() {
           ))}
         </div>
 
-        {upcoming.some(r => r.count > 0) && (
-          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 20px", marginTop: 12, animation: "fadeUp 0.5s ease 0.15s both" }}>
-            <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 10 }}>復習予定</div>
-            <div style={{ display: "flex", gap: 12 }}>
-              {upcoming.map((r, i) => (
-                <div key={i} style={{ flex: 1, textAlign: "center" }}>
-                  <div style={{ color: r.count > 0 ? C.blue : C.text3, fontSize: 18, fontWeight: 700 }}>{r.count}</div>
-                  <div style={{ color: C.text3, fontSize: 10 }}>{r.days}日後</div>
+        {/* Recent attempts */}
+        {todayAttempts.length > 0 && (
+          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 18px", marginTop: 12, animation: "fadeUp 0.5s ease 0.15s both" }}>
+            <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 10 }}>今日の記録</div>
+            {todayAttempts.slice(0, 5).map(a => {
+              const p = problems[a.problem_id];
+              return (
+                <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                  <span style={{ color: a.result === "○" ? C.green : C.red, fontSize: 16, fontWeight: 700, width: 20 }}>{a.result}</span>
+                  <span style={{ color: C.text2, fontSize: 12, flex: 1 }}>{p ? p.title : a.problem_id}</span>
+                  {a.time_min > 0 && <span style={{ color: C.text3, fontSize: 10 }}>{a.time_min}分</span>}
                 </div>
-              ))}
-            </div>
+              );
+            })}
+            {todayAttempts.length > 5 && (
+              <div style={{ color: C.text3, fontSize: 11, textAlign: "center", marginTop: 8 }}>他 {todayAttempts.length - 5}件</div>
+            )}
           </div>
         )}
 
-        <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: "18px 20px", marginTop: 12, animation: "fadeUp 0.5s ease 0.2s both" }}>
-          <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 12 }}>コメコメ暗記法</div>
-          {[
-            { s: "①", t: "不正解 → コメ1本（累積）。3〜4問後に戻る", c: C.kome },
-            { s: "②", t: "再挑戦。不正解ならコメ追加、正解ならスルー", c: C.kome },
-            { s: "③", t: "セッション中にコメ4本で今日は完成", c: C.gold },
-            { s: "④", t: "正解もスルーも、3→7→14→28日後に再出題", c: C.blue },
-            { s: "⑤", t: "復習時の不正解もコメ累積（永久に残る）", c: C.red },
-          ].map((r, i) => (
-            <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start", marginBottom: 8 }}>
-              <span style={{ color: r.c, fontSize: 13, fontWeight: 700, flexShrink: 0 }}>{r.s}</span>
-              <span style={{ color: C.text2, fontSize: 12, lineHeight: 1.5 }}>{r.t}</span>
-            </div>
-          ))}
+        {/* Topics CTA */}
+        {topics.length > 0 && (
+          <div style={{ marginTop: 16, animation: "fadeUp 0.5s ease 0.15s both" }}>
+            <Btn onClick={() => setView("topics-cat")}
+              bg={C.surface} color={C.blue}
+              style={{ width: "100%", padding: "16px", fontSize: 15, border: `1px solid ${C.blue}40`, borderRadius: 14 }}>
+              論点学習 ({topics.length})
+            </Btn>
+          </div>
+        )}
+
+        {/* Navigation */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10, animation: "fadeUp 0.5s ease 0.2s both" }}>
+          <Btn onClick={() => setView("stats")} bg={C.surface} color={C.text2} style={{ border: `1px solid ${C.border}` }}>分析</Btn>
+          <Btn onClick={() => setView("history")} bg={C.surface} color={C.text2} style={{ border: `1px solid ${C.border}` }}>履歴</Btn>
+        </div>
+        <div style={{ marginTop: 10, animation: "fadeUp 0.5s ease 0.25s both" }}>
+          <Btn onClick={() => setView("settings")} bg={C.surface} color={C.text3}
+            style={{ width: "100%", border: `1px solid ${C.border}`, fontSize: 12, padding: "10px" }}>設定</Btn>
         </div>
 
-        <div style={{ display: "flex", gap: 10, marginTop: 16, animation: "fadeUp 0.5s ease 0.25s both" }}>
-          <Btn onClick={() => setView("manage")} bg={C.surface} color={C.text2}
-            style={{ flex: 1, border: `1px solid ${C.border}` }}>問題管理</Btn>
-          <Btn onClick={exportObsidian} bg={C.surface} color={C.text2}
-            style={{ flex: 1, border: `1px solid ${C.border}` }}>Obsidian出力</Btn>
-        </div>
-        <div style={{ marginTop: 10, animation: "fadeUp 0.5s ease 0.3s both" }}>
-          <Btn onClick={() => setShowSettings(true)} bg={C.surface} color={C.text3}
-            style={{ width: "100%", border: `1px solid ${C.border}`, fontSize: 12, padding: "10px" }}>
-            API 同期設定
-          </Btn>
+        {/* Problem count */}
+        <div style={{ textAlign: "center", marginTop: 20, animation: "fadeUp 0.5s ease 0.3s both" }}>
+          <span style={{ color: C.text3, fontSize: 11 }}>{problemList.length}問 / {attempts.length}記録</span>
         </div>
       </div>
     </div>
@@ -1280,4 +1454,4 @@ function KomeKomeV2() {
 
 // ── Mount ──
 const root = createRoot(document.getElementById("root"));
-root.render(<KomeKomeV2 />);
+root.render(<App />);

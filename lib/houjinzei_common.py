@@ -249,8 +249,8 @@ def process_answer(
         else:
             data["stage"] = compute_stage(data["status"], kome_total, calc_correct, calc_wrong)
     else:
-        # 不正解
-        interval_index = 0
+        # 不正解: 2段階戻し（完全リセットではなく緩やかに）
+        interval_index = max(0, interval_index - 2)
 
         if current_status == "未着手":
             data["status"] = "学習中"
