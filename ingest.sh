@@ -83,72 +83,75 @@ GEMINI_RAW="$EXTRACTED_DIR/${SAFE_NAME}_gemini_raw.md"
 
 PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
-# --- STAGE 1a: pypdfでテキスト事前抽出（Gemini OCR回避で高速化） ---
+# --- STAGE 1a: pdfminer.sixでテキスト事前抽出（CJKエンコーディング対応） ---
 PDF_TEXT_FILE="$EXTRACTED_DIR/${SAFE_NAME}_text.txt"
 echo "   テキスト抽出中..."
 python3 - "$PDF_PATH" "$PDF_TEXT_FILE" <<'PYEOF'
-import sys
-from pypdf import PdfReader
+import sys, io
+from pdfminer.layout import LAParams
+from pdfminer.pdfpage import PDFPage
+from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
+from pdfminer.converter import TextConverter
+from pdfminer.pdfdocument import PDFDocument
+from pdfminer.pdfparser import PDFParser
 
 pdf_path, out_path = sys.argv[1], sys.argv[2]
-reader = PdfReader(pdf_path)
-with open(out_path, "w", encoding="utf-8") as f:
-    for i, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
-        if text.strip():
-            f.write(f"--- ページ {i+1} ---\n{text}\n\n")
-print(f"   {len(reader.pages)}ページ抽出完了 → {out_path}")
+rsrcmgr = PDFResourceManager()
+laparams = LAParams()
+page_count = 0
+
+with open(out_path, "w", encoding="utf-8") as outf:
+    with open(pdf_path, "rb") as fp:
+        parser = PDFParser(fp)
+        document = PDFDocument(parser)
+        for i, page in enumerate(PDFPage.create_pages(document)):
+            buf = io.StringIO()
+            device = TextConverter(rsrcmgr, buf, laparams=laparams)
+            interpreter = PDFPageInterpreter(rsrcmgr, device)
+            interpreter.process_page(page)
+            text = buf.getvalue()
+            device.close()
+            if text.strip():
+                outf.write(f"--- ページ {i+1} ---\n{text}\n\n")
+            page_count += 1
+
+print(f"   {page_count}ページ抽出完了 → {out_path}")
 PYEOF
 
 PDF_TEXT_SIZE=$(wc -c < "$PDF_TEXT_FILE")
 echo "   テキストサイズ: ${PDF_TEXT_SIZE} bytes"
 
 # --- STAGE 1b: Gemini CLI で構造分析（抽出テキストを渡す） ---
-# 小さいPDF (<500KB text) は@構文でテキスト渡し、大きいPDFもテキスト渡し（timeout延長）
-PDF_SIZE_THRESHOLD=500000
-TIMEOUT_SMALL=900
-TIMEOUT_LARGE=1800
+# テキストが大きい場合はチャプター/ページ単位に分割して処理
+CHUNK_SIZE_THRESHOLD=1000000
+PAGES_PER_CHUNK=50
+TIMEOUT_SINGLE=1800
+TIMEOUT_CHUNK=1200
 
-# --resume: 既存のGemini出力にJSON有り → STAGE 1bスキップ
+# --resume: 既存の topics.json に有効なJSONがあれば STAGE 1bスキップ
 SKIP_GEMINI=false
-if $RESUME && [ -f "$GEMINI_RAW" ]; then
+if $RESUME && [ -f "$TOPICS_FILE" ]; then
   if python3 -c "
 import re, json, sys
-with open(sys.argv[1]) as f: raw = f.read()
-m = re.search(r'\`\`\`json\s*\n(.*?)\n\`\`\`', raw, re.DOTALL)
-if m:
-    data = json.loads(m.group(1))
-    topics = data.get('topics', [])
-    if len(topics) > 0: sys.exit(0)
+with open(sys.argv[1], encoding='utf-8') as f: data = json.load(f)
+topics = data.get('topics', [])
+if isinstance(topics, list) and len(topics) > 0:
+    sys.exit(0)
 sys.exit(1)
-" "$GEMINI_RAW" 2>/dev/null; then
-    echo "   ⏩ --resume: 既存のGemini出力を再利用（JSONあり）"
+" "$TOPICS_FILE" 2>/dev/null; then
+    echo "   ⏩ --resume: 既存の topics.json を再利用"
     SKIP_GEMINI=true
   else
-    echo "   ⚠️  既存のGemini出力にJSON未発見、再実行します"
+    echo "   ⚠️  既存の topics.json が不正または空、再実行します"
   fi
 fi
 
-if ! $SKIP_GEMINI; then
-  # 古い出力を削除（noclobber対策）
-  rm -f "$GEMINI_RAW"
-  if [ "$PDF_TEXT_SIZE" -lt "$PDF_SIZE_THRESHOLD" ]; then
-    echo "   方式: @構文（テキスト渡し, timeout=${TIMEOUT_SMALL}s）"
-    PDF_TEXT_RELPATH="$(realpath --relative-to="$VAULT" "$PDF_TEXT_FILE")"
-    (cd "$VAULT" && timeout "$TIMEOUT_SMALL" gemini -p "$(printf '%s\n\n以下は「%s（資格の大原）」のテキスト抽出結果です:\n\n@%s' "$PROMPT_CONTENT" "$PDF_FILENAME" "$PDF_TEXT_RELPATH")" --yolo -o text) > "$GEMINI_RAW" 2>&1
-  else
-    echo "   方式: テキスト渡し（大容量PDF向け, timeout=${TIMEOUT_LARGE}s）"
-    PDF_TEXT_RELPATH="$(realpath --relative-to="$VAULT" "$PDF_TEXT_FILE")"
-    (cd "$VAULT" && timeout "$TIMEOUT_LARGE" gemini -p "$(printf '%s\n\n以下は「%s」のテキスト抽出結果です:\n\n@%s' "$PROMPT_CONTENT" "$PDF_FILENAME" "$PDF_TEXT_RELPATH")" --yolo -o text) > "$GEMINI_RAW" 2>&1
-  fi
-fi
-
-# Geminiの出力からMarkdownとJSONを分離
-# JSON部分を抽出（```json ... ``` ブロック）
-export GEMINI_RAW TOPICS_FILE STRUCTURE_FILE
-python3 - <<'PYEOF'
+extract_single_output() {
+  export GEMINI_RAW TOPICS_FILE STRUCTURE_FILE
+  python3 - <<'PYEOF'
 import os
 import re, json, sys
+import tempfile
 
 gemini_raw = os.environ["GEMINI_RAW"]
 topics_file = os.environ["TOPICS_FILE"]
@@ -157,51 +160,171 @@ structure_file = os.environ["STRUCTURE_FILE"]
 with open(gemini_raw, "r", encoding="utf-8") as f:
     raw = f.read()
 
-# JSONブロックを抽出
 json_match = re.search(r'```json\s*\n(.*?)\n```', raw, re.DOTALL)
-if json_match:
-    json_str = json_match.group(1)
-    # JSONとして有効か検証
-    try:
-        data = json.loads(json_str)
-        # atomic write for topics.json
-        import tempfile
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(topics_file), suffix=".tmp", prefix=".aj_")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as tf:
-                json.dump(data, tf, ensure_ascii=False, indent=2)
-                tf.write("\n")
-            os.replace(tmp, topics_file)
-        except BaseException:
-            try: os.unlink(tmp)
-            except OSError: pass
-            raise
-        print("topics.json 抽出成功")
-    except json.JSONDecodeError as e:
-        print(f"JSONパースエラー: {e}", file=sys.stderr)
-        print(f"   手動で修正してください: {gemini_raw}", file=sys.stderr)
-        with open(topics_file, "w", encoding="utf-8") as f:
-            f.write(json_str)
-        sys.exit(1)
-else:
+if not json_match:
     print("JSONブロックが見つかりませんでした", file=sys.stderr)
     print(f"   Geminiの出力を確認: {gemini_raw}", file=sys.stderr)
     sys.exit(1)
 
-# Markdown部分（JSONブロック以外）を structure.md として保存
+json_str = json_match.group(1)
+try:
+    data = json.loads(json_str)
+except json.JSONDecodeError as e:
+    print(f"JSONパースエラー: {e}", file=sys.stderr)
+    print(f"   手動で修正してください: {gemini_raw}", file=sys.stderr)
+    with open(topics_file, "w", encoding="utf-8") as f:
+        f.write(json_str)
+    sys.exit(1)
+
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(topics_file), suffix=".tmp", prefix=".aj_")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as tf:
+        json.dump(data, tf, ensure_ascii=False, indent=2)
+        tf.write("\n")
+    os.replace(tmp, topics_file)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+print("topics.json 抽出成功")
+
 md_content = re.sub(r'```json\s*\n.*?\n```', '', raw, flags=re.DOTALL).strip()
 with open(structure_file, "w", encoding="utf-8") as f:
     f.write(md_content)
 print("structure.md 抽出成功")
 PYEOF
+}
 
-if [ $? -ne 0 ]; then
-  echo ""
-  echo "❌ STAGE 1 でエラーが発生しました。"
-  echo "   Geminiの生出力: $GEMINI_RAW"
-  echo "   手動で修正してから STAGE 2 を実行:"
-  echo "   bash stage2.sh $SAFE_NAME"
-  exit 1
+extract_chunk_output() {
+  local raw_file="$1"
+  local chunk_topics_file="$2"
+  local chunk_structure_file="$3"
+  export RAW_FILE="$raw_file" CHUNK_TOPICS_FILE="$chunk_topics_file" CHUNK_STRUCTURE_FILE="$chunk_structure_file"
+  python3 - <<'PYEOF'
+import os
+import re
+import json
+import sys
+
+raw_file = os.environ["RAW_FILE"]
+chunk_topics_file = os.environ["CHUNK_TOPICS_FILE"]
+chunk_structure_file = os.environ["CHUNK_STRUCTURE_FILE"]
+
+with open(raw_file, "r", encoding="utf-8") as f:
+    raw = f.read()
+
+json_match = re.search(r'```json\s*\n(.*?)\n```', raw, re.DOTALL)
+if not json_match:
+    print(f"JSONブロックが見つかりませんでした: {raw_file}", file=sys.stderr)
+    sys.exit(1)
+
+json_str = json_match.group(1)
+try:
+    data = json.loads(json_str)
+except json.JSONDecodeError as e:
+    print(f"JSONパースエラー ({raw_file}): {e}", file=sys.stderr)
+    sys.exit(1)
+
+with open(chunk_topics_file, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+
+md_content = re.sub(r'```json\s*\n.*?\n```', '', raw, flags=re.DOTALL).strip()
+with open(chunk_structure_file, "w", encoding="utf-8") as f:
+    f.write(md_content + "\n")
+PYEOF
+}
+
+if ! $SKIP_GEMINI; then
+  rm -f "$GEMINI_RAW" "$TOPICS_FILE" "$STRUCTURE_FILE"
+  rm -f "$EXTRACTED_DIR/${SAFE_NAME}_chunk_"*_text.txt
+  rm -f "$EXTRACTED_DIR/${SAFE_NAME}_chunk_"*_gemini_raw.md
+  rm -f "$EXTRACTED_DIR/${SAFE_NAME}_chunk_"*_topics.json
+  rm -f "$EXTRACTED_DIR/${SAFE_NAME}_chunk_"*_structure.md
+  rm -f "$EXTRACTED_DIR/${SAFE_NAME}_chunk_manifest.json"
+
+  if [ "$PDF_TEXT_SIZE" -le "$CHUNK_SIZE_THRESHOLD" ]; then
+    echo "   方式: 単発処理（timeout=${TIMEOUT_SINGLE}s）"
+    PDF_TEXT_RELPATH="$(realpath --relative-to="$VAULT" "$PDF_TEXT_FILE")"
+    (cd "$VAULT" && timeout "$TIMEOUT_SINGLE" gemini -p "$(printf '%s\n\n以下は「%s」のテキスト抽出結果です:\n\n@%s' "$PROMPT_CONTENT" "$PDF_FILENAME" "$PDF_TEXT_RELPATH")" --yolo -o text) > "$GEMINI_RAW" 2>&1
+    extract_single_output
+  else
+    echo "   方式: チャンク分割処理（閾値 ${CHUNK_SIZE_THRESHOLD} bytes 超）"
+    CHUNK_MANIFEST="$EXTRACTED_DIR/${SAFE_NAME}_chunk_manifest.json"
+    python3 "$SCRIPTS_DIR/lib/chunk_splitter.py" \
+      --input "$PDF_TEXT_FILE" \
+      --output-dir "$EXTRACTED_DIR" \
+      --safe-name "$SAFE_NAME" \
+      --manifest-out "$CHUNK_MANIFEST" \
+      --pages-per-chunk "$PAGES_PER_CHUNK" >/dev/null
+
+    CHUNK_COUNT="$(python3 - "$CHUNK_MANIFEST" <<'PYEOF'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    data = json.load(f)
+print(int(data.get('chunk_count', 0)))
+PYEOF
+)"
+    if [ "$CHUNK_COUNT" -le 0 ]; then
+      echo "❌ チャンク生成に失敗しました: $CHUNK_MANIFEST"
+      exit 1
+    fi
+    echo "   チャンク数: $CHUNK_COUNT"
+
+    : > "$STRUCTURE_FILE"
+    : > "$GEMINI_RAW"
+    chunk_topics_files=()
+    for i in $(seq 1 "$CHUNK_COUNT"); do
+      CHUNK_TEXT_FILE="$EXTRACTED_DIR/${SAFE_NAME}_chunk_${i}_text.txt"
+      CHUNK_RAW_FILE="$EXTRACTED_DIR/${SAFE_NAME}_chunk_${i}_gemini_raw.md"
+      CHUNK_TOPICS_FILE="$EXTRACTED_DIR/${SAFE_NAME}_chunk_${i}_topics.json"
+      CHUNK_STRUCTURE_FILE="$EXTRACTED_DIR/${SAFE_NAME}_chunk_${i}_structure.md"
+      CHUNK_RELPATH="$(realpath --relative-to="$VAULT" "$CHUNK_TEXT_FILE")"
+
+      echo "   Gemini実行: chunk ${i}/${CHUNK_COUNT}（timeout=${TIMEOUT_CHUNK}s）"
+      CHUNK_OK=true
+      if ! (cd "$VAULT" && timeout "$TIMEOUT_CHUNK" gemini -p "$(printf '%s\n\n以下は「%s」のテキスト抽出結果（チャンク %s/%s）です:\n\n@%s' "$PROMPT_CONTENT" "$PDF_FILENAME" "$i" "$CHUNK_COUNT" "$CHUNK_RELPATH")" --yolo -o text) > "$CHUNK_RAW_FILE" 2>&1; then
+        echo "   ⚠️  chunk ${i} Gemini実行失敗（タイムアウトまたはエラー）、スキップ"
+        CHUNK_OK=false
+      fi
+
+      if $CHUNK_OK; then
+        if extract_chunk_output "$CHUNK_RAW_FILE" "$CHUNK_TOPICS_FILE" "$CHUNK_STRUCTURE_FILE"; then
+          chunk_topics_files+=("$CHUNK_TOPICS_FILE")
+        else
+          echo "   ⚠️  chunk ${i} JSON抽出失敗、スキップ"
+          CHUNK_OK=false
+        fi
+      fi
+
+      {
+        echo ""
+        echo "# chunk ${i}/${CHUNK_COUNT}"
+        echo ""
+        cat "$CHUNK_RAW_FILE" 2>/dev/null
+        echo ""
+      } >> "$GEMINI_RAW"
+      if $CHUNK_OK; then
+        {
+          echo ""
+          echo "## チャンク ${i}/${CHUNK_COUNT}"
+          echo ""
+          cat "$CHUNK_STRUCTURE_FILE"
+          echo ""
+        } >> "$STRUCTURE_FILE"
+      fi
+    done
+
+    if [ ${#chunk_topics_files[@]} -eq 0 ]; then
+      echo "❌ 全チャンクのJSON抽出に失敗しました"
+      exit 1
+    fi
+    echo "   成功チャンク: ${#chunk_topics_files[@]}/${CHUNK_COUNT}"
+    python3 "$SCRIPTS_DIR/lib/chunk_merger.py" --output "$TOPICS_FILE" "${chunk_topics_files[@]}"
+    echo "topics.json マージ成功"
+  fi
 fi
 
 echo ""
