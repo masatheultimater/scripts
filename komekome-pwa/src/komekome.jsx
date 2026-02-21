@@ -561,10 +561,124 @@ function DashboardView({ dashboardData, onBack }) {
   );
 }
 
+function InlineMarkdown({ text }) {
+  if (!text) return null;
+  const parts = [];
+  const re = /(\*\*(.+?)\*\*)|(\*(.+?)\*)|(`(.+?)`)/g;
+  let lastIndex = 0;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+    if (match[1]) {
+      parts.push(<strong key={match.index} style={{ color: C.text, fontWeight: 700 }}>{match[2]}</strong>);
+    } else if (match[3]) {
+      parts.push(<em key={match.index} style={{ fontStyle: "italic" }}>{match[4]}</em>);
+    } else if (match[5]) {
+      parts.push(<code key={match.index} style={{ background: C.surface2, padding: "1px 4px", borderRadius: 3, fontSize: "0.9em", fontFamily: "monospace", color: C.purple }}>{match[6]}</code>);
+    }
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+  return parts.length === 1 && typeof parts[0] === "string" ? parts[0] : <>{parts}</>;
+}
+
+function convertLatex(tex) {
+  const parts = [];
+  let remaining = tex;
+  let keyIndex = 0;
+
+  while (remaining.length > 0) {
+    const fracIdx = remaining.indexOf("\\frac{");
+    if (fracIdx === -1) {
+      parts.push(replaceSymbols(remaining));
+      break;
+    }
+    if (fracIdx > 0) {
+      parts.push(replaceSymbols(remaining.slice(0, fracIdx)));
+    }
+    const afterFrac = remaining.slice(fracIdx + 6);
+    const { content: num, rest: afterNum } = extractBraces(afterFrac);
+    let den = "";
+    let rest = "";
+    if (afterNum.startsWith("{")) {
+      const denParsed = extractBraces(afterNum.slice(1));
+      den = denParsed.content;
+      rest = denParsed.rest;
+    } else {
+      den = afterNum;
+      rest = "";
+    }
+
+    parts.push(
+      <span key={keyIndex++} style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", verticalAlign: "middle", margin: "0 3px", lineHeight: 1.3 }}>
+        <span style={{ borderBottom: `1px solid ${C.purple}`, padding: "0 4px", fontSize: "0.85em" }}>{convertLatex(num)}</span>
+        <span style={{ padding: "0 4px", fontSize: "0.85em" }}>{convertLatex(den)}</span>
+      </span>
+    );
+    remaining = rest || "";
+  }
+
+  return parts.length === 1 ? parts[0] : <>{parts}</>;
+}
+
+function replaceSymbols(s) {
+  return s
+    .replace(/\\times/g, "×")
+    .replace(/\\div/g, "÷")
+    .replace(/\\leq/g, "≤")
+    .replace(/\\geq/g, "≥")
+    .replace(/\\neq/g, "≠")
+    .replace(/\\cdot/g, "·")
+    .replace(/\\pm/g, "±")
+    .replace(/\\text\{(.+?)\}/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractBraces(s) {
+  let depth = 0;
+  let i = 0;
+  for (; i < s.length; i++) {
+    if (s[i] === "{") depth++;
+    else if (s[i] === "}") {
+      if (depth === 0) return { content: s.slice(0, i), rest: s.slice(i + 1) };
+      depth--;
+    }
+  }
+  return { content: s, rest: "" };
+}
+
+function MathBlock({ text }) {
+  let content = text.replace(/^\$\$\s*/, "").replace(/\s*\$\$$/, "").trim();
+  const isAlign = content.includes("\\begin{align}");
+  if (isAlign) {
+    content = content.replace(/\\begin\{align\}/, "").replace(/\\end\{align\}/, "").trim();
+    const lines = content.split(/\\\\\s*/).map((l) => l.trim()).filter(Boolean);
+    return (
+      <div style={{ color: C.purple, fontFamily: "monospace", fontSize: 12, padding: "6px 10px", background: C.surface2, borderRadius: 6, marginTop: 4, marginBottom: 4, overflowX: "auto", lineHeight: 2 }}>
+        {lines.map((line, i) => {
+          const cleaned = convertLatex(line.replace(/&/g, "").trim());
+          return <div key={i}>{cleaned}</div>;
+        })}
+      </div>
+    );
+  }
+
+  const cleaned = convertLatex(content);
+  return (
+    <div style={{ color: C.purple, fontFamily: "monospace", fontSize: 12, padding: "6px 10px", background: C.surface2, borderRadius: 6, marginTop: 4, marginBottom: 4, overflowX: "auto" }}>
+      {cleaned}
+    </div>
+  );
+}
+
 // ── Table figure component ──
 function TableFigure({ rows }) {
   if (!rows || rows.length === 0) return null;
-  // Parse rows: first non-separator row is header
   const parsed = rows.map(r => ({
     cells: r.split("|").filter(Boolean).map(c => c.trim()),
     isSep: /^[-:| ]+$/.test(r.replace(/\|/g, "").trim()),
@@ -575,11 +689,11 @@ function TableFigure({ rows }) {
   return (
     <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", marginTop: 6, marginBottom: 6 }}>
       <div style={{ display: "flex", gap: 0, background: `${C.accent}18`, padding: "6px 8px", borderBottom: `1px solid ${C.border}` }}>
-        {header.cells.map((c, j) => <span key={j} style={{ flex: 1, fontSize: 11, fontWeight: 700, color: C.accent }}>{c}</span>)}
+        {header.cells.map((c, j) => <span key={j} style={{ flex: 1, fontSize: 11, fontWeight: 700, color: C.accent }}><InlineMarkdown text={c} /></span>)}
       </div>
       {body.map((row, i) => (
         <div key={i} style={{ display: "flex", gap: 0, padding: "5px 8px", borderBottom: i < body.length - 1 ? `1px solid ${C.border}` : "none", background: i % 2 === 0 ? "transparent" : `${C.surface2}40` }}>
-          {row.cells.map((c, j) => <span key={j} style={{ flex: 1, fontSize: 11, color: C.text }}>{c}</span>)}
+          {row.cells.map((c, j) => <span key={j} style={{ flex: 1, fontSize: 11, color: C.text }}><InlineMarkdown text={c} /></span>)}
         </div>
       ))}
     </div>
@@ -590,37 +704,95 @@ function TableFigure({ rows }) {
 function SectionContent({ text }) {
   if (!text) return null;
   const lines = text.split("\n");
-  // Group consecutive table rows
+
   const blocks = [];
   let tableBuffer = [];
+  let mathBuffer = null;
+  let codeBuffer = null;
+
   const flushTable = () => {
     if (tableBuffer.length > 0) { blocks.push({ type: "table", rows: [...tableBuffer] }); tableBuffer = []; }
   };
+
   for (const line of lines) {
     const trimmed = line.trim();
-    if (trimmed.startsWith("| ") && trimmed.endsWith("|")) {
-      tableBuffer.push(trimmed);
-    } else {
-      flushTable();
-      blocks.push({ type: "line", text: trimmed });
+
+    if (trimmed.startsWith("```")) {
+      if (codeBuffer === null) {
+        flushTable();
+        codeBuffer = [];
+      } else {
+        blocks.push({ type: "code", lines: [...codeBuffer] });
+        codeBuffer = null;
+      }
+      continue;
     }
+    if (codeBuffer !== null) {
+      codeBuffer.push(line);
+      continue;
+    }
+
+    if (trimmed === "$$") {
+      if (mathBuffer === null) {
+        flushTable();
+        mathBuffer = [];
+      } else {
+        blocks.push({ type: "math", content: mathBuffer.join("\n") });
+        mathBuffer = null;
+      }
+      continue;
+    }
+    if (mathBuffer !== null) {
+      mathBuffer.push(trimmed);
+      continue;
+    }
+
+    if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
+      tableBuffer.push(trimmed);
+      continue;
+    }
+    flushTable();
+
+    if (trimmed.startsWith("$$") && trimmed.endsWith("$$") && trimmed.length > 4) {
+      blocks.push({ type: "math", content: trimmed.slice(2, -2).trim() });
+      continue;
+    }
+
+    blocks.push({ type: "line", text: trimmed });
   }
   flushTable();
+  if (mathBuffer !== null) blocks.push({ type: "math", content: mathBuffer.join("\n") });
+  if (codeBuffer !== null) blocks.push({ type: "code", lines: codeBuffer });
 
   return (
     <div style={{ fontSize: 13, lineHeight: 1.8, color: C.text }}>
       {blocks.map((block, i) => {
         if (block.type === "table") return <TableFigure key={i} rows={block.rows} />;
+        if (block.type === "math") return <MathBlock key={i} text={"$$" + block.content + "$$"} />;
+        if (block.type === "code") return (
+          <pre key={i} style={{ color: C.text2, fontFamily: "monospace", fontSize: 11, padding: "8px 10px", background: C.surface2, borderRadius: 6, marginTop: 4, marginBottom: 4, overflowX: "auto", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+            {block.lines.join("\n")}
+          </pre>
+        );
+
         const trimmed = block.text;
         if (!trimmed) return <div key={i} style={{ height: 8 }} />;
-        if (trimmed.startsWith("### ")) return <div key={i} style={{ fontWeight: 700, fontSize: 13, color: C.accent, marginTop: 12, marginBottom: 4 }}>{trimmed.slice(4)}</div>;
+
+        if (trimmed.startsWith("#### ")) return <div key={i} style={{ fontWeight: 700, fontSize: 12.5, color: C.blue, marginTop: 10, marginBottom: 3 }}><InlineMarkdown text={trimmed.slice(5)} /></div>;
+
+        if (trimmed.startsWith("### ")) return <div key={i} style={{ fontWeight: 700, fontSize: 13, color: C.accent, marginTop: 12, marginBottom: 4 }}><InlineMarkdown text={trimmed.slice(4)} /></div>;
+
         if (trimmed.startsWith("- **")) {
           const m = trimmed.match(/^- \*\*(.+?)\*\*[：:]?\s*(.*)$/);
-          if (m) return <div key={i} style={{ paddingLeft: 12, marginBottom: 4 }}><span style={{ fontWeight: 700, color: C.blue }}>{m[1]}</span>{m[2] && <span style={{ color: C.text2 }}>: {m[2]}</span>}</div>;
+          if (m) return <div key={i} style={{ paddingLeft: 12, marginBottom: 4 }}><span style={{ fontWeight: 700, color: C.blue }}>{m[1]}</span>{m[2] && <span style={{ color: C.text2 }}>: <InlineMarkdown text={m[2]} /></span>}</div>;
         }
-        if (trimmed.startsWith("- ")) return <div key={i} style={{ paddingLeft: 12, marginBottom: 2, color: C.text2 }}>{trimmed.slice(2)}</div>;
-        if (trimmed.startsWith("$$")) return <div key={i} style={{ color: C.purple, fontFamily: "monospace", fontSize: 11, padding: "4px 8px", background: C.surface2, borderRadius: 6, marginTop: 4, marginBottom: 4, overflowX: "auto" }}>{trimmed.replace(/\$\$/g, "")}</div>;
-        return <div key={i}>{trimmed}</div>;
+
+        if (trimmed.startsWith("- ")) return <div key={i} style={{ paddingLeft: 12, marginBottom: 2, color: C.text2 }}><InlineMarkdown text={trimmed.slice(2)} /></div>;
+
+        const numMatch = trimmed.match(/^(\d+)\.\s+(.*)$/);
+        if (numMatch) return <div key={i} style={{ paddingLeft: 4, marginBottom: 2, color: C.text }}><span style={{ color: C.text3, marginRight: 6, fontWeight: 600, fontSize: 12, minWidth: 18, display: "inline-block" }}>{numMatch[1]}.</span><InlineMarkdown text={numMatch[2]} /></div>;
+
+        return <div key={i}><InlineMarkdown text={trimmed} /></div>;
       })}
     </div>
   );

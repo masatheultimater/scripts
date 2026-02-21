@@ -41,10 +41,10 @@
       if (e.reason && e.reason.stack) el.textContent += e.reason.stack + '\n';
     });
   </script>
-  <script src="/app.js?v=20260221134959" onerror="document.getElementById('debug-error').textContent += 'LOAD FAIL: app.js\n'"></script>
+  <script src="/app.js?v=20260221143912" onerror="document.getElementById('debug-error').textContent += 'LOAD FAIL: app.js\n'"></script>
   <script>
     (function() {
-      var APP_VERSION = "20260221-v3";
+      var APP_VERSION = "20260221-v4";
       var stored = localStorage.getItem("kk3-app-version");
       if ('serviceWorker' in navigator && stored && stored !== APP_VERSION) {
         // Version mismatch: nuke old SW and caches, then reload
