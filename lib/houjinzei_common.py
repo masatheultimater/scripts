@@ -45,6 +45,9 @@ ENRICH_TIMEOUT = 120  # 秒: claude -p
 
 # クイズ・ログ
 DEFAULT_QUIZ_LIMIT = 20
+MAX_DAILY_PROBLEMS = 40  # 1日あたりの出題問題数上限
+MAX_CARRYOVER = 15  # 繰越問題の上限
+CARRYOVER_EXPIRY_DAYS = 2  # 繰越の有効日数
 LOG_RETENTION_DAYS = 30
 
 

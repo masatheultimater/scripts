@@ -77,7 +77,10 @@ from collections import Counter
 
 from lib.houjinzei_common import (
     VaultPaths,
+    CARRYOVER_EXPIRY_DAYS,
     INTERVAL_DAYS,
+    MAX_CARRYOVER,
+    MAX_DAILY_PROBLEMS,
     atomic_json_write,
     eprint,
     parse_date,
@@ -91,6 +94,10 @@ from lib.learning_efficiency import (
     is_focus_active,
     parse_dt_or_none,
 )
+from lib.quiz_generation import (
+    add_priority_balanced_with_problem_cap,
+    build_carryover_topics,
+)
 from lib.topic_problem_map import load_topic_problem_map
 
 DATE_ARG = os.environ.get("DATE_ARG", "").strip()
@@ -101,6 +108,7 @@ TOPIC_ROOT = vp.topics
 TODAY_OUTPUT = vp.export / "today_problems.json"
 COMPAT_OUTPUT = vp.export / "komekome_import.json"
 DASHBOARD_OUTPUT = vp.export / "dashboard_data.json"
+RESULTS_OUTPUT = vp.export / "komekome_results.json"
 
 # ── Load mapping + problems ──
 topic_map = load_topic_problem_map(os.environ["VAULT"])
@@ -120,6 +128,16 @@ def parse_frontmatter(md_path: Path) -> dict:
         return fm
     except Exception:
         return {}
+
+
+def load_json_or_default(path: Path, default):
+    if not path.exists():
+        return default
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return default
 
 
 if not TOPIC_ROOT.exists():
@@ -230,32 +248,41 @@ selected_ids = set()
 
 MAX_CATEGORY_RATIO = 0.4
 category_count = Counter()
+selection_stopped_by_problem_cap = False
+
+previous_today = load_json_or_default(TODAY_OUTPUT, {})
+results_data = load_json_or_default(RESULTS_OUTPUT, {})
+carryover_topics, carryover_count = build_carryover_topics(
+    previous_today=previous_today,
+    results_data=results_data,
+    base_date=base_date,
+    max_carryover=MAX_CARRYOVER,
+    expiry_days=CARRYOVER_EXPIRY_DAYS,
+)
+
+selected_problem_count = carryover_count
+selected_topic_count = len(carryover_topics)
 
 
-def add_priority_balanced(selected, selected_ids, candidates, reason, bucket):
-    max_per_cat = max(2, int(LIMIT * MAX_CATEGORY_RATIO))
-    ordered = sorted(
-        candidates,
-        key=lambda r: (-calc_priority_score(r, bucket, base_datetime), r["topic_id"]),
+def add_priority_balanced(selected, selected_ids, candidates, reason, bucket, mappings):
+    global selected_problem_count, selected_topic_count, selection_stopped_by_problem_cap
+    if selection_stopped_by_problem_cap:
+        return
+    selected_problem_count, selected_topic_count, selection_stopped_by_problem_cap = add_priority_balanced_with_problem_cap(
+        selected=selected,
+        selected_ids=selected_ids,
+        candidates=candidates,
+        reason=reason,
+        bucket=bucket,
+        limit=LIMIT,
+        max_category_ratio=MAX_CATEGORY_RATIO,
+        category_count=category_count,
+        mappings=mappings,
+        current_problem_count=selected_problem_count,
+        max_daily_problems=MAX_DAILY_PROBLEMS,
+        selected_topic_count=selected_topic_count,
+        priority_fn=lambda r, b: calc_priority_score(r, b, base_datetime),
     )
-    for r in ordered:
-        if len(selected) >= LIMIT:
-            break
-        if r["topic_id"] in selected_ids:
-            continue
-        cat = r["category"]
-        if category_count[cat] >= max_per_cat:
-            continue
-        selected.append(
-            {
-                **r,
-                "reason": reason,
-                "priority_bucket": bucket,
-                "priority_score": calc_priority_score(r, bucket, base_datetime),
-            }
-        )
-        selected_ids.add(r["topic_id"])
-        category_count[cat] += 1
 
 
 # ---- 優先度0: 卒業後定期復習 (最大2問) ----
@@ -265,6 +292,17 @@ if graduated_review:
         key=lambda r: (-calc_priority_score(r, 0, base_datetime), r["topic_id"]),
     )
     for r in ordered_graduated[:2]:
+        if len(selected) >= LIMIT or selection_stopped_by_problem_cap:
+            break
+        if r["topic_id"] in selected_ids:
+            continue
+        topic_problem_count = len(mappings.get(r["topic_id"], []))
+        if (
+            selected_problem_count + topic_problem_count > MAX_DAILY_PROBLEMS
+            and selected_topic_count > 0
+        ):
+            selection_stopped_by_problem_cap = True
+            break
         if len(selected) < LIMIT and r["topic_id"] not in selected_ids:
             selected.append(
                 {
@@ -276,6 +314,8 @@ if graduated_review:
             )
             selected_ids.add(r["topic_id"])
             category_count[r["category"]] += 1
+            selected_problem_count += topic_problem_count
+            selected_topic_count += 1
 
 # ---- 優先度1: 弱点集中24h ----
 focus_24h = [
@@ -283,7 +323,7 @@ focus_24h = [
     if is_focus_active(r.get("focus_until_at"), base_datetime)
     and r["stage"] in ("学習中", "復習中")
 ]
-add_priority_balanced(selected, selected_ids, focus_24h, "弱点集中24h", 1)
+add_priority_balanced(selected, selected_ids, focus_24h, "弱点集中24h", 1, mappings)
 
 # ---- 優先度1.2: needs_focus (連続不正解トピック) ----
 needs_focus = [
@@ -292,7 +332,7 @@ needs_focus = [
     and r["calc_wrong"] > r["calc_correct"]
     and r["stage"] in ("学習中", "復習中")
 ]
-add_priority_balanced(selected, selected_ids, needs_focus, "弱点集中", 1.2)
+add_priority_balanced(selected, selected_ids, needs_focus, "弱点集中", 1.2, mappings)
 
 # ---- 優先度1.5: 失効検出 (期日7日以上超過) ----
 lapsed = []
@@ -306,18 +346,18 @@ for r in records:
     overdue = (base_date - r["last_practiced"]).days - required_days
     if overdue >= 7:
         lapsed.append({**r, "overdue_days": overdue})
-add_priority_balanced(selected, selected_ids, lapsed, "失効復習", 1.5)
+add_priority_balanced(selected, selected_ids, lapsed, "失効復習", 1.5, mappings)
 
 # ---- 優先度2: interval_index ベース復習 ----
 interval_due = interval_review_due()
 if interval_due:
-    add_priority_balanced(selected, selected_ids, interval_due, "間隔復習", 2)
+    add_priority_balanced(selected, selected_ids, interval_due, "間隔復習", 2, mappings)
 
 # ---- 優先度3: レガシー復習 ----
-add_priority_balanced(selected, selected_ids, review_due(3), "3日後復習", 3)
-add_priority_balanced(selected, selected_ids, review_due(7), "7日後復習", 3)
-add_priority_balanced(selected, selected_ids, review_due(14), "14日後復習", 3)
-add_priority_balanced(selected, selected_ids, review_due(28), "28日後復習", 3)
+add_priority_balanced(selected, selected_ids, review_due(3), "3日後復習", 3, mappings)
+add_priority_balanced(selected, selected_ids, review_due(7), "7日後復習", 3, mappings)
+add_priority_balanced(selected, selected_ids, review_due(14), "14日後復習", 3, mappings)
+add_priority_balanced(selected, selected_ids, review_due(28), "28日後復習", 3, mappings)
 
 # ---- 優先度4: 弱点補強 ----
 add_priority_balanced(
@@ -325,6 +365,7 @@ add_priority_balanced(
     [r for r in records if r["stage"] in ("学習中", "復習中") and r["calc_wrong"] > r["calc_correct"]],
     "弱点補強",
     4,
+    mappings,
 )
 
 # ---- 優先度5: 新規A論点 ----
@@ -333,6 +374,7 @@ add_priority_balanced(
     [r for r in records if r["stage"] == "未着手" and r["importance"] == "A"],
     "新規A論点",
     5,
+    mappings,
 )
 
 # ---- 優先度6: 新規B論点 ----
@@ -341,11 +383,12 @@ add_priority_balanced(
     [r for r in records if r["stage"] == "未着手" and r["importance"] == "B"],
     "新規B論点",
     6,
+    mappings,
 )
 
 # ── 出力: today_problems.json ──
-total_problems = 0
-topics_out = []
+total_problems = carryover_count
+topics_out = list(carryover_topics)
 
 
 def focus_until_to_text(raw):
@@ -402,9 +445,10 @@ TODAY_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
 payload = {
     "generated_date": base_date.strftime("%Y-%m-%d"),
     "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    "schema_version": 2,
-    "selection_policy": "srs-v2-frequency-focus24h",
+    "schema_version": 3,
+    "selection_policy": "srs-v3-problemcap40-carryover",
     "dashboard_key": "learning_dashboard_v1",
+    "carryover_count": carryover_count,
     "total_topics": len(topics_out),
     "total_problems": total_problems,
     "topics": topics_out,
@@ -429,7 +473,8 @@ reason_count = Counter(t["reason"] for t in topics_out)
 print(f"生成完了: {TODAY_OUTPUT}")
 print(f"基準日: {base_date.strftime('%Y-%m-%d')}")
 print(f"論点数: {len(topics_out)} / 上限 {LIMIT}")
-print(f"問題数: {total_problems}")
+print(f"繰越問題数: {carryover_count} / 上限 {MAX_CARRYOVER} (有効期限 {CARRYOVER_EXPIRY_DAYS}日)")
+print(f"問題数: {total_problems} / 上限 {MAX_DAILY_PROBLEMS}")
 print(f"ダッシュボード: {DASHBOARD_OUTPUT}")
 if reason_count:
     print("内訳:")
