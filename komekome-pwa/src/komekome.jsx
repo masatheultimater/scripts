@@ -42,6 +42,13 @@ function weekStart(d) { const x = new Date(d + "T00:00:00"); x.setDate(x.getDate
 function monthStart(d) { return d.slice(0, 7) + "-01"; }
 function yearStart(d) { return d.slice(0, 4) + "-01-01"; }
 function fmtDate(d) { if (!d) return "-"; const [, m, day] = d.split("-"); return `${+m}/${+day}`; }
+function formatRemain(until) {
+  const ms = new Date(until) - new Date();
+  if (ms <= 0) return "期限切れ";
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  return h > 0 ? h + "時間" + m + "分" : m + "分";
+}
 
 const C = {
   bg: "#0f1419", surface: "#1a1f2e", surface2: "#222838", surface3: "#2a3142",
@@ -119,6 +126,23 @@ const BOOK_SHORT = {
   "法人計算問題集3-1": "計算3-1", "法人計算問題集3-2": "計算3-2",
   "法人理論問題集": "理論",
 };
+const DASHBOARD_CATEGORIES = [
+  "損金算入",
+  "所得計算",
+  "その他",
+  "グループ法人",
+  "益金不算入",
+  "組織再編",
+  "税額計算",
+  "国際課税",
+  "総則・定義",
+  "欠損金",
+  "申告納付等",
+  "圧縮記帳等",
+  "通算制度",
+  "資本等取引",
+  "引当金・準備金",
+];
 
 // ── Card component ──
 function Card({ title, children, style: extra = {} }) {
@@ -168,7 +192,7 @@ function AuthImage({ src, token, style: extra = {}, alt = "" }) {
 // ── Reason badge for today's problems ──
 function ReasonBadge({ reason }) {
   const colors = {
-    "弱点集中": C.red, "失効復習": C.red, "卒業後復習": C.purple,
+    "弱点集中24h": C.red, "弱点集中": C.red, "失効復習": C.red, "卒業後復習": C.purple,
     "間隔復習": C.blue, "弱点補強": C.yellow,
     "3日後復習": C.green, "7日後復習": C.green, "14日後復習": C.green, "28日後復習": C.green,
     "新規A論点": C.accent, "新規B論点": C.text2,
@@ -468,6 +492,75 @@ function StatsView({ attempts, problems, problemList, onBack }) {
   );
 }
 
+// ═══════ DASHBOARD VIEW ═══════
+function DashboardView({ dashboardData, onBack }) {
+  const categories = useMemo(() => {
+    const raw = Array.isArray(dashboardData?.categories) ? dashboardData.categories : [];
+    const map = new Map(raw.map(c => [c.name, c]));
+    return DASHBOARD_CATEGORIES.map((name) => map.get(name) || ({
+      name,
+      total_topics: 0,
+      stage_counts: { "未着手": 0, "学習中": 0, "復習中": 0, "卒業済": 0 },
+      progress_rate: 0,
+      accuracy: 0,
+      graduation_probability: 0,
+      focus_active_topics: 0,
+    }));
+  }, [dashboardData]);
+
+  const totals = dashboardData?.totals || {};
+  const stageColors = { "未着手": "#5f6980", "学習中": "#ff8b3d", "復習中": "#5b9cf6", "卒業済": "#3dd68c" };
+
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
+      <div style={{ maxWidth: 480, margin: "0 auto" }}>
+        <button onClick={onBack} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← 戻る</button>
+        <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 4px" }}>カテゴリ進捗</h2>
+        <div style={{ color: C.text3, fontSize: 11, marginBottom: 12 }}>{dashboardData?.generated_date || "-"}</div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
+          <StatNum value={totals.topics || 0} label="総論点" color={C.accent} />
+          <StatNum value={totals.attempted_topics || 0} label="着手" color={C.blue} />
+          <StatNum value={totals.graduated_topics || 0} label="卒業" color={C.green} />
+          <StatNum value={`${Math.round((totals.overall_accuracy || 0) * 100)}%`} label="正答率" color={C.yellow} />
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {categories.map((cat) => {
+            const sc = cat.stage_counts || {};
+            const total = cat.total_topics || 0;
+            const segments = ["未着手", "学習中", "復習中", "卒業済"];
+            return (
+              <div key={cat.name} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: "12px 14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <span style={{ color: C.text, fontSize: 14, fontWeight: 700 }}>{cat.name}</span>
+                  <span style={{ color: C.text3, fontSize: 11 }}>{total}論点</span>
+                </div>
+
+                <div style={{ height: 8, background: C.surface3, borderRadius: 5, overflow: "hidden", display: "flex", marginBottom: 8 }}>
+                  {segments.map((k) => {
+                    const count = sc[k] || 0;
+                    const pct = total > 0 ? (count / total) * 100 : 0;
+                    return <div key={k} style={{ width: `${pct}%`, background: stageColors[k] }} />;
+                  })}
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                  <div style={{ color: C.text2, fontSize: 11 }}>正答率 {Math.round((cat.accuracy || 0) * 100)}%</div>
+                  <div style={{ color: C.text2, fontSize: 11 }}>卒業確率 {Math.round((cat.graduation_probability || 0) * 100)}%</div>
+                  <div style={{ color: (cat.focus_active_topics || 0) > 0 ? C.red : C.text3, fontSize: 11, textAlign: "right" }}>
+                    フォーカス {(cat.focus_active_topics || 0)}件
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Markdown-like section renderer ──
 function SectionContent({ text }) {
   if (!text) return null;
@@ -527,6 +620,7 @@ function App() {
 
   // Today's problems state
   const [todayData, setTodayData] = useState(null);
+  const [dashboardData, setDashboardData] = useState(null);
   const [todayProblem, setTodayProblem] = useState(null);
   const [todayTopicCtx, setTodayTopicCtx] = useState(null);
   const [pageViewStep, setPageViewStep] = useState("view"); // "view" | "mistakes"
@@ -594,6 +688,13 @@ function App() {
               setTodayData(tdData); save("kk3-today", tdData);
             }
           } catch {}
+          // Fetch dashboard data
+          try {
+            const dbData = await apiFetch(`${apiBase(savedUrl)}/api/komekome/dashboard`, savedToken);
+            if (dbData && dbData.categories) {
+              setDashboardData(dbData); save("kk3-dashboard", dbData);
+            }
+          } catch {}
           setSyncStatus("synced"); setSyncMsg("OK");
         } catch (e) {
           // Offline fallback
@@ -603,11 +704,15 @@ function App() {
           if (cachedTopics.length > 0) { setTopics(cachedTopics); setTopicCategories(load("kk3-topic-cats", [])); }
           const cachedToday = load("kk3-today", null);
           if (cachedToday) setTodayData(cachedToday);
+          const cachedDashboard = load("kk3-dashboard", null);
+          if (cachedDashboard) setDashboardData(cachedDashboard);
           setSyncStatus("offline"); setSyncMsg(e.message);
         }
       } else {
         const cached = load("kk3-problems", {});
         if (Object.keys(cached).length > 0) setProblems(cached);
+        const cachedDashboard = load("kk3-dashboard", null);
+        if (cachedDashboard) setDashboardData(cachedDashboard);
       }
       setLoaded(true);
     })();
@@ -1134,15 +1239,26 @@ function App() {
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               {tdTopics.map(topic => (
-                <div key={topic.topic_id} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 16px" }}>
+                <div key={topic.topic_id} style={{
+                  background: C.surface,
+                  border: `1px solid ${C.border}`,
+                  borderLeft: topic.weak_focus?.active ? `3px solid ${C.red}` : undefined,
+                  borderRadius: 14,
+                  padding: "14px 16px",
+                }}>
                   {/* Topic header */}
                   <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
                     <span style={{ color: C.text, fontSize: 14, fontWeight: 700, flex: 1 }}>{topic.topic_name}</span>
-                    <ReasonBadge reason={topic.reason} />
+                    <ReasonBadge reason={topic.weak_focus?.active ? "弱点集中24h" : topic.reason} />
                     <RankBadge rank={topic.importance} />
                   </div>
                   <div style={{ color: C.text3, fontSize: 10, marginBottom: 10 }}>
                     {topic.category} / 間隔Lv.{topic.interval_index}
+                    {topic.weak_focus?.active && topic.weak_focus?.until_at && (
+                      <span style={{ color: C.red, fontSize: 10, marginLeft: 8 }}>
+                        残り {formatRemain(topic.weak_focus.until_at)}
+                      </span>
+                    )}
                   </div>
 
                   {/* Problems under this topic */}
@@ -1297,6 +1413,11 @@ function App() {
     return <StatsView attempts={attempts} problems={problems} problemList={problemList} onBack={() => setView("home")} />;
   }
 
+  // ═══════ DASHBOARD ═══════
+  if (view === "dashboard") {
+    return <DashboardView dashboardData={dashboardData} onBack={() => setView("home")} />;
+  }
+
   // ═══════ HISTORY ═══════
   if (view === "history") {
     const recentAttempts = attempts.slice(0, 100);
@@ -1434,8 +1555,9 @@ function App() {
         )}
 
         {/* Navigation */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10, animation: "fadeUp 0.5s ease 0.2s both" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 10, animation: "fadeUp 0.5s ease 0.2s both" }}>
           <Btn onClick={() => setView("stats")} bg={C.surface} color={C.text2} style={{ border: `1px solid ${C.border}` }}>分析</Btn>
+          <Btn onClick={() => setView("dashboard")} bg={C.surface} color={C.text2} style={{ border: `1px solid ${C.border}` }}>カテゴリ進捗</Btn>
           <Btn onClick={() => setView("history")} bg={C.surface} color={C.text2} style={{ border: `1px solid ${C.border}` }}>履歴</Btn>
         </div>
         <div style={{ marginTop: 10, animation: "fadeUp 0.5s ease 0.25s both" }}>

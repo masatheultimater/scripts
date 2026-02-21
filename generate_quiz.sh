@@ -71,7 +71,6 @@ print(f'マッピング更新: {stats[\"mapped\"]}/{stats[\"total_topics\"]}ト�
 python3 - <<'PY'
 import json
 import os
-import random
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from collections import Counter
@@ -85,6 +84,13 @@ from lib.houjinzei_common import (
     read_frontmatter,
     to_int,
 )
+from lib.learning_efficiency import (
+    build_category_dashboard,
+    calc_priority_score,
+    get_frequency_score,
+    is_focus_active,
+    parse_dt_or_none,
+)
 from lib.topic_problem_map import load_topic_problem_map
 
 DATE_ARG = os.environ.get("DATE_ARG", "").strip()
@@ -94,6 +100,7 @@ vp = VaultPaths(os.environ["VAULT"])
 TOPIC_ROOT = vp.topics
 TODAY_OUTPUT = vp.export / "today_problems.json"
 COMPAT_OUTPUT = vp.export / "komekome_import.json"
+DASHBOARD_OUTPUT = vp.export / "dashboard_data.json"
 
 # ── Load mapping + problems ──
 topic_map = load_topic_problem_map(os.environ["VAULT"])
@@ -120,6 +127,8 @@ if not TOPIC_ROOT.exists():
     raise SystemExit(1)
 
 base_date = date.today() if not DATE_ARG else parse_date(DATE_ARG)
+runtime_now = datetime.now()
+base_datetime = runtime_now if not DATE_ARG else datetime.combine(base_date, runtime_now.time())
 
 records = []
 for md in sorted(TOPIC_ROOT.rglob("*.md")):
@@ -168,9 +177,12 @@ for md in sorted(TOPIC_ROOT.rglob("*.md")):
             "calc_wrong": to_int(fm.get("calc_wrong", 0)),
             "kome_total": to_int(fm.get("kome_total", 0)),
             "interval_index": interval_index,
+            "frequency_score": get_frequency_score(importance),
+            "focus_until_at": fm.get("focus_until_at"),
         }
     )
 
+all_records = list(records)
 
 # 卒業済み論点: 30日以上経過したものだけ定期復習対象として残す
 GRADUATION_REVIEW_DAYS = 30
@@ -189,8 +201,13 @@ records = active_records
 
 def review_due(days: int):
     cutoff = base_date - timedelta(days=days)
-    return [r for r in records if r["last_practiced"] is not None
-            and r["last_practiced"] <= cutoff]
+    due = []
+    for r in records:
+        if r["last_practiced"] is None or r["last_practiced"] > cutoff:
+            continue
+        overdue = max((base_date - r["last_practiced"]).days - days, 0)
+        due.append({**r, "overdue_days": overdue})
+    return due
 
 
 def interval_review_due():
@@ -203,7 +220,8 @@ def interval_review_due():
             continue
         required_days = INTERVAL_DAYS[idx]
         if r["last_practiced"] <= base_date - timedelta(days=required_days):
-            due.append(r)
+            overdue = max((base_date - r["last_practiced"]).days - required_days, 0)
+            due.append({**r, "overdue_days": overdue})
     return due
 
 
@@ -214,10 +232,13 @@ MAX_CATEGORY_RATIO = 0.4
 category_count = Counter()
 
 
-def add_priority_balanced(selected, selected_ids, candidates, reason):
+def add_priority_balanced(selected, selected_ids, candidates, reason, bucket):
     max_per_cat = max(2, int(LIMIT * MAX_CATEGORY_RATIO))
-    random.shuffle(candidates)
-    for r in candidates:
+    ordered = sorted(
+        candidates,
+        key=lambda r: (-calc_priority_score(r, bucket, base_datetime), r["topic_id"]),
+    )
+    for r in ordered:
         if len(selected) >= LIMIT:
             break
         if r["topic_id"] in selected_ids:
@@ -225,28 +246,53 @@ def add_priority_balanced(selected, selected_ids, candidates, reason):
         cat = r["category"]
         if category_count[cat] >= max_per_cat:
             continue
-        selected.append({**r, "reason": reason})
+        selected.append(
+            {
+                **r,
+                "reason": reason,
+                "priority_bucket": bucket,
+                "priority_score": calc_priority_score(r, bucket, base_datetime),
+            }
+        )
         selected_ids.add(r["topic_id"])
         category_count[cat] += 1
 
 
 # ---- 優先度0: 卒業後定期復習 (最大2問) ----
 if graduated_review:
-    random.shuffle(graduated_review)
-    for r in graduated_review[:2]:
+    ordered_graduated = sorted(
+        graduated_review,
+        key=lambda r: (-calc_priority_score(r, 0, base_datetime), r["topic_id"]),
+    )
+    for r in ordered_graduated[:2]:
         if len(selected) < LIMIT and r["topic_id"] not in selected_ids:
-            selected.append({**r, "reason": "卒業後復習"})
+            selected.append(
+                {
+                    **r,
+                    "reason": "卒業後復習",
+                    "priority_bucket": 0,
+                    "priority_score": calc_priority_score(r, 0, base_datetime),
+                }
+            )
             selected_ids.add(r["topic_id"])
             category_count[r["category"]] += 1
 
-# ---- 優先度1: needs_focus (連続不正解トピック) ----
+# ---- 優先度1: 弱点集中24h ----
+focus_24h = [
+    r for r in records
+    if is_focus_active(r.get("focus_until_at"), base_datetime)
+    and r["stage"] in ("学習中", "復習中")
+]
+add_priority_balanced(selected, selected_ids, focus_24h, "弱点集中24h", 1)
+
+# ---- 優先度1.2: needs_focus (連続不正解トピック) ----
 needs_focus = [
     r for r in records
     if r["calc_wrong"] >= 2
     and r["calc_wrong"] > r["calc_correct"]
     and r["stage"] in ("学習中", "復習中")
 ]
-add_priority_balanced(selected, selected_ids, needs_focus, "弱点集中")
+add_priority_balanced(selected, selected_ids, needs_focus, "弱点集中", 1.2)
 
 # ---- 優先度1.5: 失効検出 (期日7日以上超過) ----
 lapsed = []
@@ -259,27 +305,26 @@ for r in records:
     required_days = INTERVAL_DAYS[idx]
     overdue = (base_date - r["last_practiced"]).days - required_days
     if overdue >= 7:
-        lapsed.append((overdue, r))
-lapsed.sort(key=lambda x: -x[0])
-add_priority_balanced(selected, selected_ids, [r for _, r in lapsed], "失効復習")
+        lapsed.append({**r, "overdue_days": overdue})
+add_priority_balanced(selected, selected_ids, lapsed, "失効復習", 1.5)
 
 # ---- 優先度2: interval_index ベース復習 ----
 interval_due = interval_review_due()
 if interval_due:
-    interval_due.sort(key=lambda r: r["interval_index"], reverse=True)
-    add_priority_balanced(selected, selected_ids, interval_due, "間隔復習")
+    add_priority_balanced(selected, selected_ids, interval_due, "間隔復習", 2)
 
 # ---- 優先度3: レガシー復習 ----
-add_priority_balanced(selected, selected_ids, review_due(3), "3日後復習")
-add_priority_balanced(selected, selected_ids, review_due(7), "7日後復習")
-add_priority_balanced(selected, selected_ids, review_due(14), "14日後復習")
-add_priority_balanced(selected, selected_ids, review_due(28), "28日後復習")
+add_priority_balanced(selected, selected_ids, review_due(3), "3日後復習", 3)
+add_priority_balanced(selected, selected_ids, review_due(7), "7日後復習", 3)
+add_priority_balanced(selected, selected_ids, review_due(14), "14日後復習", 3)
+add_priority_balanced(selected, selected_ids, review_due(28), "28日後復習", 3)
 
 # ---- 優先度4: 弱点補強 ----
 add_priority_balanced(
     selected, selected_ids,
     [r for r in records if r["stage"] in ("学習中", "復習中") and r["calc_wrong"] > r["calc_correct"]],
     "弱点補強",
+    4,
 )
 
 # ---- 優先度5: 新規A論点 ----
@@ -287,6 +332,7 @@ add_priority_balanced(
     selected, selected_ids,
     [r for r in records if r["stage"] == "未着手" and r["importance"] == "A"],
     "新規A論点",
+    5,
 )
 
 # ---- 優先度6: 新規B論点 ----
@@ -294,11 +340,19 @@ add_priority_balanced(
     selected, selected_ids,
     [r for r in records if r["stage"] == "未着手" and r["importance"] == "B"],
     "新規B論点",
+    6,
 )
 
 # ── 出力: today_problems.json ──
 total_problems = 0
 topics_out = []
+
+
+def focus_until_to_text(raw):
+    dt = parse_dt_or_none(raw)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") if dt else None
+
+
 for s in selected:
     tid = s["topic_id"]
     problem_ids = mappings.get(tid, [])
@@ -319,6 +373,12 @@ for s in selected:
             "page_image_key": f"{prob.get('book', '')}/{prob.get('page', 0):03d}.webp" if prob.get("page") else None,
         })
     total_problems += len(problems_out)
+    focus_until_at = focus_until_to_text(s.get("focus_until_at"))
+    weak_focus_active = bool(
+        focus_until_at
+        and is_focus_active(focus_until_at, base_datetime)
+        and s.get("stage") in ("学習中", "復習中")
+    )
     topics_out.append({
         "topic_id": tid,
         "topic_name": s["topic_name"],
@@ -326,6 +386,14 @@ for s in selected:
         "reason": s["reason"],
         "interval_index": s["interval_index"],
         "importance": s["importance"],
+        "priority_bucket": s.get("priority_bucket"),
+        "priority_score": s.get("priority_score", 0),
+        "frequency_score": s.get("frequency_score", get_frequency_score(s.get("importance", ""))),
+        "weak_focus": {
+            "active": weak_focus_active,
+            "until_at": focus_until_at,
+            "trigger": "calc_wrong>=2",
+        },
         "problems": problems_out,
     })
 
@@ -334,12 +402,18 @@ TODAY_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
 payload = {
     "generated_date": base_date.strftime("%Y-%m-%d"),
     "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    "schema_version": 2,
+    "selection_policy": "srs-v2-frequency-focus24h",
+    "dashboard_key": "learning_dashboard_v1",
     "total_topics": len(topics_out),
     "total_problems": total_problems,
     "topics": topics_out,
 }
 
 atomic_json_write(TODAY_OUTPUT, payload)
+
+dashboard_data = build_category_dashboard(all_records, datetime.now())
+atomic_json_write(DASHBOARD_OUTPUT, dashboard_data)
 
 # 後方互換: 空の komekome_import.json を生成
 compat_payload = {
@@ -356,6 +430,7 @@ print(f"生成完了: {TODAY_OUTPUT}")
 print(f"基準日: {base_date.strftime('%Y-%m-%d')}")
 print(f"論点数: {len(topics_out)} / 上限 {LIMIT}")
 print(f"問題数: {total_problems}")
+print(f"ダッシュボード: {DASHBOARD_OUTPUT}")
 if reason_count:
     print("内訳:")
     for reason, cnt in reason_count.items():
@@ -367,7 +442,7 @@ PY
 # Cloudflare Workers同期（失敗してもquiz生成は成功扱い）
 SYNC_SCRIPT="$SCRIPTS_DIR/komekome_sync.sh"
 if [[ -f "$SYNC_SCRIPT" ]]; then
-  for cmd in push push-today push-topics; do
+  for cmd in push push-today push-topics push-dashboard; do
     if ! bash "$SYNC_SCRIPT" "$cmd" 2>&1; then
       echo "⚠️  sync $cmd 失敗（quiz生成は成功済み）" >&2
     fi

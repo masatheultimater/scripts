@@ -36,7 +36,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -52,6 +52,7 @@ from lib.houjinzei_common import (
     to_int,
     write_frontmatter,
 )
+from lib.learning_efficiency import FOCUS_HOURS, FOCUS_REASON, parse_dt_or_none
 
 
 def error_exit(message: str) -> None:
@@ -256,6 +257,26 @@ def update_topic_note(path: Path, topic_result, session_date: str):
     current_status = data.get("status", "未着手")
     calc_correct = to_int(data.get("calc_correct", 0))
     calc_wrong = to_int(data.get("calc_wrong", 0))
+    now = datetime.now()
+
+    if topic_result["correct"]:
+        calc_correct += 1
+        data["calc_correct"] = calc_correct
+
+        # 24hフォーカス中に正解した場合は解除
+        fu_raw = data.get("focus_until_at")
+        fu_dt = parse_dt_or_none(fu_raw)
+        if fu_dt and now <= fu_dt:
+            data.pop("focus_until_at", None)
+    else:
+        calc_wrong += 1
+        data["calc_wrong"] = calc_wrong
+
+        # 不正解が2回以上で24hフォーカス発火
+        if calc_wrong >= 2:
+            data["focus_until_at"] = (now + timedelta(hours=FOCUS_HOURS)).strftime("%Y-%m-%dT%H:%M:%S")
+            data["focus_reason"] = FOCUS_REASON
+            data["focus_hits"] = to_int(data.get("focus_hits", 0)) + 1
 
     # 卒業済みノートは stage/status を巻き戻さない
     if current_status == "卒業":

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================
 # コメコメ Cloudflare Workers 同期スクリプト
-# 使い方: bash komekome_sync.sh push|pull|push-topics|push-today|status
+# 使い方: bash komekome_sync.sh push|pull|push-topics|push-today|push-dashboard|status
 #   push        - komekome_import.json を Workers API にアップロード
 #   pull        - Workers API から未処理結果をダウンロードし writeback 実行
 #   push-topics - 充実済み論点ノートを Workers API にアップロード
 #   push-today  - today_problems.json を Workers API にアップロード
+#   push-dashboard - dashboard_data.json を Workers API にアップロード
 #   status      - API のステータスを表示
 # ============================================================
 
@@ -44,7 +45,7 @@ fi
 export PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
 
 usage() {
-  echo "使い方: bash komekome_sync.sh push|pull|push-topics|push-today|status"
+  echo "使い方: bash komekome_sync.sh push|pull|push-topics|push-today|push-dashboard|status"
 }
 
 # ── push: problems_master.json → Workers API ──
@@ -377,6 +378,35 @@ do_push_today() {
   echo "push-today 完了: today_problems.json → Workers API"
 }
 
+# ── push-dashboard: dashboard_data.json → Workers API ──
+do_push_dashboard() {
+  local dashboard_file="$EXPORT_DIR/dashboard_data.json"
+  if [[ ! -f "$dashboard_file" ]]; then
+    echo "エラー: $dashboard_file が見つかりません" >&2
+    return 1
+  fi
+
+  local response
+  response=$(curl -s -w "\n%{http_code}" -X POST \
+    "${API_URL}/api/komekome/dashboard" \
+    -H "Authorization: Bearer ${API_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -H "User-Agent: komekome-sync/1.0" \
+    -d @"$dashboard_file")
+
+  local http_code
+  http_code=$(echo "$response" | tail -1)
+  local body
+  body=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" != "200" ]]; then
+    echo "エラー: push-dashboard 失敗 (HTTP $http_code): $body" >&2
+    return 1
+  fi
+
+  echo "push-dashboard 完了: dashboard_data.json → Workers API"
+}
+
 # ── main ──
 if [[ $# -lt 1 ]]; then
   usage
@@ -388,6 +418,7 @@ case "$1" in
   pull)        do_pull ;;
   push-topics) do_push_topics ;;
   push-today)  do_push_today ;;
+  push-dashboard) do_push_dashboard ;;
   status)      do_status ;;
   *)
     echo "エラー: 不明なコマンド: $1" >&2
