@@ -23,6 +23,7 @@ DRY_RUN=false
 LIMIT=0
 SLEEP_SEC=5
 CATEGORIES=""
+ENGINE="claude"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,14 +43,19 @@ while [[ $# -gt 0 ]]; do
       CATEGORIES="$2"
       shift 2
       ;;
+    --engine)
+      ENGINE="$2"
+      shift 2
+      ;;
     -h|--help)
-      echo "使い方: bash enrich_topics.sh [--dry-run] [--limit N] [--sleep-sec S] [--categories CAT1,CAT2,...]"
+      echo "使い方: bash enrich_topics.sh [--dry-run] [--limit N] [--sleep-sec S] [--categories CAT1,CAT2,...] [--engine claude|codex]"
       echo ""
       echo "オプション:"
       echo "  --dry-run        対象ノートの一覧を表示するのみ（実行しない）"
       echo "  --limit N        処理する最大件数（0 = 無制限）"
       echo "  --sleep-sec S    各ノート処理後のスリープ秒数（デフォルト: 5）"
       echo "  --categories C   カンマ区切りのカテゴリフィルタ（並列実行用）"
+      echo "  --engine E       生成エンジン: claude (デフォルト) or codex"
       exit 0
       ;;
     *)
@@ -59,7 +65,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-export VAULT DRY_RUN LIMIT SLEEP_SEC CATEGORIES
+export VAULT DRY_RUN LIMIT SLEEP_SEC CATEGORIES ENGINE
 
 # リファレンスノート（充実済み）のbody部分を取得
 REFERENCE_NOTE="$VAULT/10_論点/損金算入/損金算入_寄附金_損金算入限度額.md"
@@ -72,6 +78,7 @@ echo "日時: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "ドライラン: $DRY_RUN"
 echo "制限件数: $LIMIT"
 echo "スリープ: ${SLEEP_SEC}秒"
+echo "エンジン: $ENGINE"
 echo ""
 
 python3 - <<'PY'
@@ -213,6 +220,8 @@ def build_prompt(fm: dict, body: str, reference_body: str) -> str:
 6. Markdown形式で出力してください"""
 
 
+ENGINE = os.environ.get("ENGINE", "claude")
+
 MAX_RETRIES = 3
 RETRY_BACKOFF = [10, 30, 60]  # seconds
 
@@ -241,39 +250,89 @@ def save_progress(completed: set):
     ))
 
 
-def enrich_note(md_path: Path, fm: dict, body: str, reference_body: str) -> bool:
-    prompt = build_prompt(fm, body, reference_body)
+def _run_claude(prompt: str, md_path: Path, attempt: int) -> str | None:
+    """claude -p で生成。成功時は本文文字列、失敗時は None。"""
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt, "--output-format", "text", "--model", "claude-sonnet-4-5"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except FileNotFoundError:
+        eprint("エラー: claude コマンドが見つかりません")
+        return None
+    except subprocess.TimeoutExpired:
+        eprint(f"タイムアウト (試行 {attempt+1}/{MAX_RETRIES}): {md_path}")
+        return None
 
-    for attempt in range(MAX_RETRIES):
+    if result.returncode != 0:
+        eprint(f"claude -p 失敗 (code {result.returncode}, 試行 {attempt+1}/{MAX_RETRIES}): {md_path}")
+        if result.stderr:
+            eprint(result.stderr[:500])
+        return None
+
+    return result.stdout.strip()
+
+
+def _run_codex(prompt: str, md_path: Path, attempt: int) -> str | None:
+    """codex exec で生成。プロンプトをファイル経由で渡し、出力ファイルから読み取る。"""
+    work_dir = tempfile.mkdtemp(prefix="enrich_codex_")
+    prompt_file = os.path.join(work_dir, "prompt.txt")
+    output_file = os.path.join(work_dir, "output.md")
+
+    try:
+        with open(prompt_file, "w", encoding="utf-8") as f:
+            f.write(prompt)
+
+        codex_instruction = (
+            f"Read the prompt in {prompt_file}. "
+            f"Follow the instructions exactly and write ONLY the markdown output to {output_file}. "
+            f"Do NOT include frontmatter (---). Output the markdown body only."
+        )
+
         try:
             result = subprocess.run(
-                ["claude", "-p", prompt, "--output-format", "text", "--model", "claude-sonnet-4-5"],
+                ["codex", "exec", "--full-auto", "--skip-git-repo-check", "-C", work_dir, codex_instruction],
                 capture_output=True,
                 text=True,
                 timeout=300,
             )
         except FileNotFoundError:
-            eprint("エラー: claude コマンドが見つかりません")
-            return False
+            eprint("エラー: codex コマンドが見つかりません")
+            return None
         except subprocess.TimeoutExpired:
-            eprint(f"タイムアウト (試行 {attempt+1}/{MAX_RETRIES}): {md_path}")
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_BACKOFF[attempt])
-                continue
-            return False
+            eprint(f"codex タイムアウト (試行 {attempt+1}/{MAX_RETRIES}): {md_path}")
+            return None
 
         if result.returncode != 0:
-            eprint(f"claude -p 失敗 (code {result.returncode}, 試行 {attempt+1}/{MAX_RETRIES}): {md_path}")
+            eprint(f"codex 失敗 (code {result.returncode}, 試行 {attempt+1}/{MAX_RETRIES}): {md_path}")
             if result.stderr:
                 eprint(result.stderr[:500])
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_BACKOFF[attempt])
-                continue
-            return False
+            return None
 
-        new_body = result.stdout.strip()
+        if not os.path.exists(output_file):
+            eprint(f"codex 出力ファイルなし (試行 {attempt+1}/{MAX_RETRIES}): {md_path}")
+            return None
+
+        with open(output_file, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    finally:
+        import shutil
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def enrich_note(md_path: Path, fm: dict, body: str, reference_body: str) -> bool:
+    prompt = build_prompt(fm, body, reference_body)
+
+    runner = _run_codex if ENGINE == "codex" else _run_claude
+
+    for attempt in range(MAX_RETRIES):
+        new_body = runner(prompt, md_path, attempt)
+
         if not new_body or len(new_body) < 50:
-            eprint(f"生成結果が短すぎます (試行 {attempt+1}/{MAX_RETRIES}): {md_path}")
+            if new_body is not None:
+                eprint(f"生成結果が短すぎます (試行 {attempt+1}/{MAX_RETRIES}): {md_path}")
             if attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_BACKOFF[attempt])
                 continue

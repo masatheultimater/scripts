@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # ============================================================
 # コメコメ Cloudflare Workers 同期スクリプト
-# 使い方: bash komekome_sync.sh push|pull|push-topics|push-today|push-dashboard|push-schedule|pull-schedule|status
+# 使い方: bash komekome_sync.sh push|pull|push-topics|push-today|push-dashboard|push-theory|push-schedule|pull-schedule|status
 #   push        - komekome_import.json を Workers API にアップロード
 #   pull        - Workers API から未処理結果をダウンロードし writeback 実行
 #   push-topics - 充実済み論点ノートを Workers API にアップロード
 #   push-today  - today_problems.json を Workers API にアップロード
 #   push-dashboard - dashboard_data.json を Workers API にアップロード
+#   push-theory - theory_bank.json を Workers API にアップロード
 #   push-schedule - weekly_schedule.json を Workers API にアップロード
 #   pull-schedule - Workers API から weekly_schedule.json をダウンロード
 #   status      - API のステータスを表示
@@ -47,7 +48,7 @@ fi
 export PYTHONPATH="${SCRIPTS_DIR}:${PYTHONPATH:-}"
 
 usage() {
-  echo "使い方: bash komekome_sync.sh push|pull|push-topics|push-today|push-dashboard|push-schedule|pull-schedule|status"
+  echo "使い方: bash komekome_sync.sh push|pull|push-topics|push-today|push-dashboard|push-theory|push-schedule|pull-schedule|status"
 }
 
 # ── push: problems_master.json → Workers API ──
@@ -278,14 +279,18 @@ for path in sorted(notes_root.rglob("*.md")):
     if not fm or not isinstance(fm, dict):
         continue
 
-    # 空テンプレートはスキップ（本文200文字未満）
+    # pdf_refsがあるトピックは図解参照として含める
+    pdf_refs = fm.get("pdf_refs", [])
+    has_refs = isinstance(pdf_refs, list) and len(pdf_refs) > 0
+
+    # 空テンプレートはスキップ（本文200文字未満）、ただしpdf_refsありは除外しない
     body_stripped = body.strip()
-    if len(body_stripped) < 200:
+    if len(body_stripped) < 200 and not has_refs:
         continue
 
     sections = extract_body_sections(body)
-    # summaryが空なら充実されていない
-    if not sections.get("summary"):
+    # summaryが空なら充実されていない、ただしpdf_refsありは除外しない
+    if not sections.get("summary") and not has_refs:
         continue
 
     rel = path.relative_to(notes_root).as_posix()
@@ -293,7 +298,11 @@ for path in sorted(notes_root.rglob("*.md")):
     category = fm.get("category", "その他")
     categories.add(category)
 
-    topics.append({
+    # Check if calc_image exists for this topic
+    calc_img_path = vault_root / "02_extracted" / "calc_images" / (topic_id + ".webp")
+    steps_image = f"calc_hints/{topic_id}.webp" if calc_img_path.exists() else ""
+
+    topic_dict = {
         "topic_id": topic_id,
         "topic": fm.get("topic", ""),
         "category": category,
@@ -313,7 +322,12 @@ for path in sorted(notes_root.rglob("*.md")):
         "mistake_items": sections.get("mistake_items", []),
         "related": fm.get("related", []),
         "statutes": sections.get("statutes", ""),
-    })
+        "pdf_refs": fm.get("pdf_refs", []),
+    }
+    if steps_image:
+        topic_dict["steps_image"] = steps_image
+
+    topics.append(topic_dict)
 
 data = {
     "version": 1,
@@ -414,6 +428,35 @@ do_push_dashboard() {
   echo "push-dashboard 完了: dashboard_data.json → Workers API"
 }
 
+# ── push-theory: theory_bank.json → Workers API ──
+do_push_theory() {
+  local theory_file="$EXPORT_DIR/theory_bank.json"
+  if [[ ! -f "$theory_file" ]]; then
+    echo "エラー: $theory_file が見つかりません" >&2
+    return 1
+  fi
+
+  local response
+  response=$(curl -s -w "\n%{http_code}" -X POST \
+    "${API_URL}/api/komekome/theory" \
+    -H "Authorization: Bearer ${API_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -H "User-Agent: komekome-sync/1.0" \
+    -d @"$theory_file")
+
+  local http_code
+  http_code=$(echo "$response" | tail -1)
+  local body
+  body=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" != "200" ]]; then
+    echo "エラー: push-theory 失敗 (HTTP $http_code): $body" >&2
+    return 1
+  fi
+
+  echo "push-theory 完了: theory_bank.json → Workers API"
+}
+
 # ── push-schedule: weekly_schedule.json → Workers API ──
 do_push_schedule() {
   local schedule_file="$EXPORT_DIR/weekly_schedule.json"
@@ -479,6 +522,7 @@ case "$1" in
   push-topics) do_push_topics ;;
   push-today)  do_push_today ;;
   push-dashboard) do_push_dashboard ;;
+  push-theory) do_push_theory ;;
   push-schedule) do_push_schedule ;;
   pull-schedule) do_pull_schedule ;;
   status)      do_status ;;

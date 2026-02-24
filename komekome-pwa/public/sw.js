@@ -1,4 +1,4 @@
-const CACHE_VERSION = "20260221143912";
+const CACHE_VERSION = "20260224165458";
 const STATIC_CACHE_NAME = `komekome-static-v2-${CACHE_VERSION}`;
 const RUNTIME_CACHE_NAME = `komekome-runtime-v2-${CACHE_VERSION}`;
 const CACHE_PREFIXES = ["komekome-static-v2-", "komekome-runtime-v2-"];

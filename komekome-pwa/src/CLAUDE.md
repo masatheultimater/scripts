@@ -7,5 +7,10 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
+| #4964 | 1:39 AM | 🔵 | komekomeシステムの構成ファイル判明 | ~139 |
+| #4931 | 1:31 AM | ✅ | Settings screen API URL field updated to clarify same-origin default behavior | ~266 |
 | #4847 | 12:53 AM | 🔵 | komekome-pwa is a spaced-repetition flashcard app with "kome" (rice) gamification | ~326 |
+| #4846 | " | 🔵 | komekome.jsx implements spaced repetition with re-insert queue logic | ~312 |
+| #4845 | 12:52 AM | 🔵 | komekome PWA Client-Side Token Auth and Sync Logic | ~305 |
+| #4844 | " | 🔵 | KomeKomeV2 React component architecture — flashcard PWA with KV sync | ~298 |
 </claude-mem-context>

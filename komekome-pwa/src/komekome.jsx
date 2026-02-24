@@ -838,8 +838,13 @@ function App() {
   const [topics, setTopics] = useState([]);
   const [topicCategories, setTopicCategories] = useState([]);
   const [topicCat, setTopicCat] = useState(null);
+  const [topicSubcat, setTopicSubcat] = useState(null);
   const [topicItem, setTopicItem] = useState(null);
   const [topicSearch, setTopicSearch] = useState("");
+  // Theory quiz state
+  const [theoryBank, setTheoryBank] = useState([]);
+  const [theoryQuiz, setTheoryQuiz] = useState(null); // { questions: [], current: 0, answers: [] }
+  const [theoryFilter, setTheoryFilter] = useState("all"); // category filter
 
   // Settings
   const [apiTokenInput, setApiTokenInput] = useState("");
@@ -859,6 +864,8 @@ function App() {
     setApiToken(savedToken); setApiTokenInput(savedToken);
     setApiUrl(savedUrl); setApiUrlInput(savedUrl);
     setAttempts(load("kk3-attempts", []));
+    const cachedTheory = load("kk3-theory", []);
+    if (cachedTheory.length > 0 && theoryBank.length === 0) setTheoryBank(cachedTheory);
 
     (async () => {
       if (savedToken) {
@@ -910,6 +917,14 @@ function App() {
               setScheduleCategories(schData.scope_categories);
             }
           } catch {}
+          // Load theory bank
+          try {
+            const thData = await apiFetch(`${apiBase(savedUrl)}/api/komekome/theory`, savedToken);
+            if (thData?.questions) {
+              setTheoryBank(thData.questions);
+              save("kk3-theory", thData.questions);
+            }
+          } catch {}
           setSyncStatus("synced"); setSyncMsg("OK");
         } catch (e) {
           // Offline fallback
@@ -921,6 +936,8 @@ function App() {
           if (cachedToday) setTodayData(cachedToday);
           const cachedDashboard = load("kk3-dashboard", null);
           if (cachedDashboard) setDashboardData(cachedDashboard);
+          const cachedTheoryOffline = load("kk3-theory", []);
+          if (cachedTheoryOffline.length > 0) setTheoryBank(cachedTheoryOffline);
           setSyncStatus("offline"); setSyncMsg(e.message);
         }
       } else {
@@ -928,6 +945,8 @@ function App() {
         if (Object.keys(cached).length > 0) setProblems(cached);
         const cachedDashboard = load("kk3-dashboard", null);
         if (cachedDashboard) setDashboardData(cachedDashboard);
+        const cachedTheoryNoToken = load("kk3-theory", []);
+        if (cachedTheoryNoToken.length > 0) setTheoryBank(cachedTheoryNoToken);
       }
       setLoaded(true);
     })();
@@ -955,6 +974,24 @@ function App() {
   const problemAttempts = useCallback((pid) => {
     return attempts.filter(a => a.problem_id === pid);
   }, [attempts]);
+
+  const startTheoryQuiz = useCallback((category) => {
+    let pool = category === "all" ? [...theoryBank] : theoryBank.filter(q => q.category === category);
+    const aPool = pool.filter(q => q.importance === "A");
+    const otherPool = pool.filter(q => q.importance !== "A");
+    const shuffle = arr => {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+      return arr;
+    };
+    shuffle(aPool);
+    shuffle(otherPool);
+    const selected = [...aPool, ...otherPool].slice(0, 10);
+    setTheoryQuiz({ questions: selected, current: 0, answers: [] });
+    setView("theory-quiz");
+  }, [theoryBank]);
 
   // ── Submit attempt ──
   const submitAttempt = useCallback(async () => {
@@ -1296,7 +1333,12 @@ function App() {
   // ═══════ TOPICS: Category List ═══════
   if (view === "topics-cat") {
     const catCounts = {};
-    topics.forEach(t => { catCounts[t.category] = (catCounts[t.category] || 0) + 1; });
+    const catSubcats = {};
+    topics.forEach(t => {
+      catCounts[t.category] = (catCounts[t.category] || 0) + 1;
+      if (!catSubcats[t.category]) catSubcats[t.category] = new Set();
+      if (t.subcategory) catSubcats[t.category].add(t.subcategory);
+    });
     const catList = topicCategories.length > 0 ? topicCategories : Object.keys(catCounts).sort();
     const totalTopics = topics.length;
 
@@ -1315,10 +1357,18 @@ function App() {
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {catList.map(cat => {
               const count = catCounts[cat] || 0;
+              const subcatCount = catSubcats[cat] ? catSubcats[cat].size : 0;
+              const hasSubcats = subcatCount >= 2 && count > 30;
               return (
-                <button key={cat} onClick={() => { setTopicCat(cat); setView("topics-list"); }}
+                <button key={cat} onClick={() => {
+                  setTopicCat(cat); setTopicSubcat(null);
+                  setView(hasSubcats ? "topics-subcat" : "topics-list");
+                }}
                   style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: "16px 20px", cursor: "pointer", fontFamily: font, textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ color: C.text, fontSize: 15, fontWeight: 600 }}>{cat}</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ color: C.text, fontSize: 15, fontWeight: 600 }}>{cat}</span>
+                    {hasSubcats && <span style={{ color: C.text3, fontSize: 11 }}>[{subcatCount}分野]</span>}
+                  </div>
                   <span style={{ color: C.accent, fontSize: 14, fontWeight: 700 }}>{count}</span>
                 </button>
               );
@@ -1366,10 +1416,54 @@ function App() {
     );
   }
 
+  // ═══════ TOPICS: Subcategory List ═══════
+  if (view === "topics-subcat" && topicCat) {
+    const catTopics = topics.filter(t => t.category === topicCat);
+    const subcatCounts = {};
+    catTopics.forEach(t => {
+      const sc = t.subcategory || "(未分類)";
+      subcatCounts[sc] = (subcatCounts[sc] || 0) + 1;
+    });
+    const subcatList = Object.entries(subcatCounts).sort((a, b) => b[1] - a[1]);
+
+    return (
+      <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
+        <div style={{ maxWidth: 480, margin: "0 auto" }}>
+          <button onClick={() => { setTopicCat(null); setView("topics-cat"); }} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← カテゴリ</button>
+          <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 4px" }}>{topicCat}</h2>
+          <div style={{ color: C.text3, fontSize: 11, marginBottom: 16 }}>{catTopics.length}件 / {subcatList.length}分野</div>
+
+          <button onClick={() => { setTopicSubcat(null); setView("topics-list"); }}
+            style={{ background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 20px", cursor: "pointer", fontFamily: font, textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", marginBottom: 8 }}>
+            <span style={{ color: C.accent, fontSize: 14, fontWeight: 600 }}>全て表示</span>
+            <span style={{ color: C.text3, fontSize: 13 }}>{catTopics.length}</span>
+          </button>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {subcatList.map(([sc, count]) => (
+              <button key={sc} onClick={() => { setTopicSubcat(sc); setView("topics-list"); }}
+                style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 18px", cursor: "pointer", fontFamily: font, textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ color: C.text, fontSize: 14, fontWeight: 500 }}>{sc}</span>
+                <span style={{ color: C.accent, fontSize: 13, fontWeight: 700 }}>{count}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ═══════ TOPICS: Topic List (by category) ═══════
   if (view === "topics-list" && topicCat) {
-    const catTopics = topics.filter(t => t.category === topicCat)
-      .sort((a, b) => {
+    // Check if this category has subcategories (for back navigation)
+    const catAllTopics = topics.filter(t => t.category === topicCat);
+    const catSubcatSet = new Set(catAllTopics.map(t => t.subcategory).filter(Boolean));
+    const hasSubcatView = catSubcatSet.size >= 2 && catAllTopics.length > 30;
+
+    const catTopics = (topicSubcat
+      ? catAllTopics.filter(t => (t.subcategory || "(未分類)") === topicSubcat)
+      : catAllTopics
+    ).sort((a, b) => {
         // Sort: importance A > B > C, then by display_name
         const rankOrder = { A: 0, B: 1, C: 2 };
         const ra = rankOrder[a.importance] ?? 3;
@@ -1378,11 +1472,16 @@ function App() {
         return (a.display_name || a.topic).localeCompare(b.display_name || b.topic, "ja");
       });
 
+    const backTarget = topicSubcat ? "topics-subcat" : (hasSubcatView ? "topics-subcat" : "topics-cat");
+    const backLabel = topicSubcat ? `← ${topicCat}` : "← カテゴリ";
+
     return (
       <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
         <div style={{ maxWidth: 480, margin: "0 auto" }}>
-          <button onClick={() => setView("topics-cat")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← カテゴリ</button>
-          <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 4px" }}>{topicCat}</h2>
+          <button onClick={() => { if (topicSubcat) { setTopicSubcat(null); } setView(backTarget); }} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>{backLabel}</button>
+          <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 4px" }}>
+            {topicSubcat ? <>{topicCat} <span style={{ color: C.text3, fontWeight: 400 }}>/</span> {topicSubcat}</> : topicCat}
+          </h2>
           <div style={{ color: C.text3, fontSize: 11, marginBottom: 16 }}>{catTopics.length}件</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {catTopics.map(t => (
@@ -1394,8 +1493,8 @@ function App() {
                   <RankBadge rank={t.importance} />
                 </div>
                 <div style={{ color: C.text3, fontSize: 11 }}>
-                  {t.subcategory && <span>{t.subcategory}</span>}
-                  {t.kome_total > 0 && <span style={{ marginLeft: 8 }}>米{t.kome_total}</span>}
+                  {!topicSubcat && t.subcategory && <span>{t.subcategory}</span>}
+                  {t.kome_total > 0 && <span style={{ marginLeft: !topicSubcat && t.subcategory ? 8 : 0 }}>米{t.kome_total}</span>}
                   {t.keywords && t.keywords.length > 0 && <span style={{ marginLeft: 8 }}>{t.keywords.slice(0, 3).join(", ")}</span>}
                 </div>
               </button>
@@ -1419,7 +1518,7 @@ function App() {
     return (
       <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
         <div style={{ maxWidth: 480, margin: "0 auto" }}>
-          <button onClick={() => setView(topicCat ? "topics-list" : "topics-search")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← 戻る</button>
+          <button onClick={() => setView(topicCat ? "topics-list" : "topics-search")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← {topicCat ? (topicSubcat || topicCat) : "検索結果"}</button>
 
           {/* Header */}
           <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "16px 18px", marginBottom: 12 }}>
@@ -1468,6 +1567,23 @@ function App() {
                   <div style={{ color: C.green, fontSize: 12 }}>{m.correct}</div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* PDF Reference Images (図解 etc.) */}
+          {t.pdf_refs && t.pdf_refs.length > 0 && (
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "16px 18px", marginBottom: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                <span style={{ width: 24, height: 24, borderRadius: 6, background: `${C.accent}20`, color: C.accent, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>図</span>
+                <span style={{ color: C.text, fontSize: 14, fontWeight: 700 }}>参考ページ ({t.pdf_refs.length})</span>
+              </div>
+              <div style={{ touchAction: "pinch-zoom", overflow: "auto", WebkitOverflowScrolling: "touch" }}>
+                {t.pdf_refs.map((ref, i) => (
+                  <div key={i} style={{ marginBottom: 8 }}>
+                    <AuthImage src={`${apiBase(apiUrl)}/api/komekome/page-image/${ref}`} token={apiToken} alt={ref} />
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -1609,9 +1725,11 @@ function App() {
       const topicId = todayTopicCtx?.topic_id;
       const topicData = topicId ? topics.find(t => t.topic_id === topicId) : null;
       const reviewSections = [
+        { key: "summary", title: "概要", icon: "S", color: C.blue },
         { key: "mistakes", title: "間違えやすいポイント", icon: "!", color: C.red },
         { key: "steps", title: "計算手順", icon: "C", color: C.accent },
         { key: "judgment", title: "判断ポイント", icon: "J", color: C.green },
+        { key: "statutes", title: "関連条文", icon: "§", color: C.purple },
       ];
       // Resolve related topics
       const relatedTopics = (topicData?.related || []).filter(r => r).map(name => {
@@ -1651,6 +1769,21 @@ function App() {
                       </div>
                     );
                   })}
+
+                  {/* PDF reference images (図解) */}
+                  {topicData.pdf_refs && topicData.pdf_refs.length > 0 && (
+                    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 16px", marginBottom: 12 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                        <span style={{ width: 22, height: 22, borderRadius: 6, background: `${C.yellow}20`, color: C.yellow, fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>📖</span>
+                        <span style={{ color: C.text, fontSize: 13, fontWeight: 700 }}>参考ページ</span>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {topicData.pdf_refs.map((ref, i) => (
+                          <AuthImage key={i} src={`${apiBase(apiUrl)}/api/komekome/page-image/${ref}`} token={apiToken} alt={ref} />
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Related topics */}
                   {relatedTopics.length > 0 && (
@@ -1769,7 +1902,8 @@ function App() {
               const hintContent = isTheory
                 ? (topicData.statutes || topicData.conditions?.join("\n") || "")
                 : (topicData.steps || "");
-              if (!hintContent) return null;
+              const stepsImage = !isTheory && topicData.steps_image;
+              if (!hintContent && !stepsImage) return null;
               return (
                 <div style={{ marginBottom: 12 }}>
                   <button onClick={() => setHintOpen(!hintOpen)}
@@ -1782,7 +1916,15 @@ function App() {
                       <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, marginBottom: 8 }}>
                         {isTheory ? "関連条文" : "計算手順"}
                       </div>
-                      <SectionContent text={hintContent} />
+                      {stepsImage ? (
+                        <AuthImage
+                          src={`${apiBase(apiUrl)}/api/komekome/page-image/${stepsImage}`}
+                          token={apiToken}
+                          alt="計算手順"
+                        />
+                      ) : (
+                        <SectionContent text={hintContent} />
+                      )}
                     </div>
                   )}
                 </div>
@@ -1860,6 +2002,161 @@ function App() {
               })}
             </div>
           )}
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════ THEORY SETUP ═══════
+  if (view === "theory-setup") {
+    const cats = [...new Set(theoryBank.map(q => q.category))].sort();
+    const countByCat = {};
+    theoryBank.forEach(q => { countByCat[q.category] = (countByCat[q.category] || 0) + 1; });
+
+    return (
+      <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
+        <div style={{ maxWidth: 480, margin: "0 auto" }}>
+          <button onClick={() => setView("home")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 12 }}>← 戻る</button>
+          <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 16px" }}>理論チェック</h2>
+          <p style={{ color: C.text2, fontSize: 13, marginBottom: 16 }}>カテゴリを選んで10問の○×クイズに挑戦</p>
+
+          {/* All categories option */}
+          <button onClick={() => { setTheoryFilter("all"); startTheoryQuiz("all"); }}
+            style={{ width: "100%", background: C.surface, border: `1px solid ${C.purple}40`, borderRadius: 14, padding: "16px 18px", cursor: "pointer", fontFamily: font, textAlign: "left", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ color: C.purple, fontSize: 15, fontWeight: 700 }}>全カテゴリ</span>
+            <span style={{ color: C.text3, fontSize: 12 }}>{theoryBank.length}問</span>
+          </button>
+
+          {cats.map(cat => (
+            <button key={cat} onClick={() => { setTheoryFilter(cat); startTheoryQuiz(cat); }}
+              style={{ width: "100%", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 18px", cursor: "pointer", fontFamily: font, textAlign: "left", marginBottom: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ color: C.text, fontSize: 14 }}>{cat}</span>
+              <span style={{ color: C.text3, fontSize: 12 }}>{countByCat[cat]}問</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════ THEORY QUIZ ═══════
+  if (view === "theory-quiz" && theoryQuiz) {
+    const { questions, current, answers } = theoryQuiz;
+
+    // Results view
+    if (current >= questions.length) {
+      const correct = answers.filter(a => a.correct).length;
+      return (
+        <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
+          <div style={{ maxWidth: 480, margin: "0 auto" }}>
+            <div style={{ textAlign: "center", marginBottom: 24 }}>
+              <div style={{ fontSize: 48, fontWeight: 700, color: correct >= 8 ? C.green : correct >= 5 ? C.blue : C.red, marginBottom: 8 }}>{correct}/{questions.length}</div>
+              <div style={{ color: C.text2, fontSize: 15 }}>
+                {correct >= 8 ? "素晴らしい！" : correct >= 5 ? "もう少し！" : "復習しよう"}
+              </div>
+            </div>
+
+            {/* Review wrong answers */}
+            {answers.filter(a => !a.correct).length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 8 }}>間違えた問題</div>
+                {answers.filter(a => !a.correct).map((a, i) => (
+                  <div key={i} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: "12px 16px", marginBottom: 8 }}>
+                    <div style={{ color: C.red, fontSize: 12, fontWeight: 600, marginBottom: 4 }}>× {a.question.category}</div>
+                    <div style={{ color: C.text, fontSize: 13, marginBottom: 6, lineHeight: 1.5 }}>{a.question.question}</div>
+                    <div style={{ color: C.text2, fontSize: 12, lineHeight: 1.4 }}>
+                      <span style={{ color: a.question.answer ? C.green : C.red, fontWeight: 700 }}>{a.question.answer ? "○" : "×"}</span>
+                      {" "}{a.question.explanation}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <Btn onClick={() => { setTheoryQuiz(null); setView("theory-setup"); }} bg={C.purple} color="#fff" style={{ width: "100%", padding: "16px", fontSize: 16 }}>もう一度</Btn>
+            <div style={{ marginTop: 8 }}>
+              <Btn onClick={() => { setTheoryQuiz(null); setView("home"); }} bg={C.surface} color={C.text2} style={{ width: "100%", border: `1px solid ${C.border}` }}>ホームへ</Btn>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Current question
+    const q = questions[current];
+    const hasAnswered = answers.length > current;
+    const thisAnswer = hasAnswered ? answers[current] : null;
+
+    return (
+      <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", fontFamily: font }}>
+        <div style={{ flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch", padding: "20px 16px" }}>
+          <div style={{ maxWidth: 480, margin: "0 auto" }}>
+            {/* Progress */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <button onClick={() => { setTheoryQuiz(null); setView("home"); }} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8 }}>← やめる</button>
+              <span style={{ color: C.text2, fontSize: 13, fontWeight: 600 }}>{current + 1} / {questions.length}</span>
+            </div>
+
+            {/* Progress bar */}
+            <div style={{ height: 4, background: C.surface3, borderRadius: 2, marginBottom: 20, overflow: "hidden" }}>
+              <div style={{ height: "100%", background: C.purple, width: `${(current / questions.length) * 100}%`, borderRadius: 2, transition: "width 0.3s" }} />
+            </div>
+
+            {/* Category + importance badge */}
+            <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12 }}>
+              <span style={{ color: C.text3, fontSize: 11, fontWeight: 600 }}>{q.category}</span>
+              <RankBadge rank={q.importance} />
+            </div>
+
+            {/* Question */}
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "20px 18px", marginBottom: 16 }}>
+              <div style={{ color: C.text, fontSize: 15, lineHeight: 1.7, fontWeight: 500 }}>{q.question}</div>
+            </div>
+
+            {/* Feedback after answering */}
+            {hasAnswered && (
+              <div style={{ background: thisAnswer.correct ? `${C.green}10` : `${C.red}10`, border: `1px solid ${thisAnswer.correct ? C.green : C.red}40`, borderRadius: 14, padding: "16px 18px", marginBottom: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <span style={{ fontSize: 20, fontWeight: 700, color: thisAnswer.correct ? C.green : C.red }}>{thisAnswer.correct ? "○ 正解！" : "× 不正解"}</span>
+                </div>
+                <div style={{ color: C.text, fontSize: 13, lineHeight: 1.6 }}>
+                  <span style={{ fontWeight: 700 }}>正答: {q.answer ? "○" : "×"}</span>
+                </div>
+                <div style={{ color: C.text2, fontSize: 13, lineHeight: 1.5, marginTop: 6 }}>{q.explanation}</div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Answer buttons or Next button */}
+        <div style={{ padding: "10px 16px 14px", flexShrink: 0, background: C.bg, borderTop: `1px solid ${C.border}` }}>
+          <div style={{ maxWidth: 480, margin: "0 auto" }}>
+            {!hasAnswered ? (
+              <div style={{ display: "flex", gap: 12 }}>
+                <button onClick={() => {
+                  const correct = q.answer === true;
+                  setTheoryQuiz(prev => ({ ...prev, answers: [...prev.answers, { correct, userAnswer: true, question: q }] }));
+                }}
+                  style={{ flex: 1, padding: "18px", borderRadius: 14, border: `2px solid ${C.green}`, background: C.greenDim, cursor: "pointer", fontFamily: font }}>
+                  <div style={{ fontSize: 28, color: C.green, fontWeight: 700 }}>○</div>
+                  <div style={{ color: C.green, fontSize: 12, marginTop: 2 }}>正しい</div>
+                </button>
+                <button onClick={() => {
+                  const correct = q.answer === false;
+                  setTheoryQuiz(prev => ({ ...prev, answers: [...prev.answers, { correct, userAnswer: false, question: q }] }));
+                }}
+                  style={{ flex: 1, padding: "18px", borderRadius: 14, border: `2px solid ${C.red}`, background: C.redDim, cursor: "pointer", fontFamily: font }}>
+                  <div style={{ fontSize: 28, color: C.red, fontWeight: 700 }}>×</div>
+                  <div style={{ color: C.red, fontSize: 12, marginTop: 2 }}>誤り</div>
+                </button>
+              </div>
+            ) : (
+              <Btn onClick={() => setTheoryQuiz(prev => ({ ...prev, current: prev.current + 1 }))}
+                bg={C.purple} color="#fff" style={{ width: "100%", padding: "16px", fontSize: 16 }}>
+                {current + 1 < questions.length ? "次の問題" : "結果を見る"}
+              </Btn>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -1952,6 +2249,17 @@ function App() {
               bg={C.surface} color={C.blue}
               style={{ width: "100%", padding: "16px", fontSize: 15, border: `1px solid ${C.blue}40`, borderRadius: 14 }}>
               論点学習 ({topics.length})
+            </Btn>
+          </div>
+        )}
+
+        {theoryBank.length > 0 && (
+          <div style={{ marginTop: 8, animation: "fadeUp 0.5s ease 0.17s both" }}>
+            <Btn onClick={() => setView("theory-setup")}
+              bg={C.surface} color={C.purple}
+              style={{ width: "100%", padding: "16px", fontSize: 15, border: `1px solid ${C.purple}40`, borderRadius: 14, display: "flex", justifyContent: "center", alignItems: "center", gap: 10 }}>
+              <span>理論チェック</span>
+              <span style={{ background: C.purple, color: "#fff", fontSize: 12, fontWeight: 700, padding: "2px 8px", borderRadius: 10 }}>{theoryBank.length}</span>
             </Btn>
           </div>
         )}
