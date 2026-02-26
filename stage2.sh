@@ -282,6 +282,9 @@ if not source_type and source_type_prompt.strip():
 
 publisher_folder = sanitize_path_name(publisher or "不明出版社")
 safe_source_name = sanitize_path_name(source_name or "unknown_source")
+# Avoid duplicate publisher prefix (e.g. "大原 大原 法人理論問題集")
+if publisher and short_source_name.startswith(publisher):
+    short_source_name = short_source_name[len(publisher):].strip()
 source_entry = f"{publisher} {short_source_name}".strip()
 today = datetime.date.today().isoformat()
 

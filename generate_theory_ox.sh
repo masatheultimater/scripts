@@ -153,6 +153,15 @@ def collect_body_content(body: str) -> str:
             continue
         parts.append(f"## {heading}\n{text}")
     content = "\n\n".join(parts).strip()
+    # Fallback: if section extraction found nothing, use raw body
+    if not content:
+        raw = body.strip()
+        # Skip frontmatter if accidentally included
+        if raw.startswith("---"):
+            end = raw.find("\n---\n", 4)
+            if end != -1:
+                raw = raw[end + 5:].strip()
+        content = raw[:3000] if raw else ""
     if len(content) > 3000:
         return content[:3000]
     return content
