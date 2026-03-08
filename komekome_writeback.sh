@@ -252,6 +252,7 @@ def update_topic_note(path: Path, topic_result, session_date: str):
     incoming_interval = topic_result.get("interval_index")
     if incoming_interval is not None:
         current_interval = incoming_interval
+        current_interval = max(0, min(current_interval, GRADUATION_INTERVAL_INDEX))
 
     # --- stage / status 更新 ---
     current_status = data.get("status", "未着手")
@@ -278,9 +279,15 @@ def update_topic_note(path: Path, topic_result, session_date: str):
             data["focus_reason"] = FOCUS_REASON
             data["focus_hits"] = to_int(data.get("focus_hits", 0)) + 1
 
-    # 卒業済みノートは stage/status を巻き戻さない
+    # 卒業済みノートでも不正解なら降格
     if current_status == "卒業":
-        data["stage"] = data.get("stage", "卒業済")
+        if not topic_result["correct"]:
+            # 卒業取消: 不正解で復習中に戻す
+            data["status"] = "復習中"
+            current_interval = max(0, current_interval - 2)
+            data["stage"] = "復習中"
+        else:
+            data["stage"] = data.get("stage", "卒業済")
     elif topic_result["correct"]:
         data["stage"] = "復習中" if new_kome >= KOME_THRESHOLD_REVIEW else "学習中"
 
@@ -296,7 +303,7 @@ def update_topic_note(path: Path, topic_result, session_date: str):
 
         # 卒業判定: interval_index ベース（優先）
         graduated = False
-        if current_interval >= GRADUATION_INTERVAL_INDEX and new_kome >= GRADUATION_MIN_KOME:
+        if current_interval >= GRADUATION_INTERVAL_INDEX and new_kome >= GRADUATION_MIN_KOME and calc_correct >= 2:
             graduated = True
 
         # レガシーフォールバック: gap ベース（interval_index 未設定ノート向け）
@@ -334,7 +341,7 @@ def update_topic_note(path: Path, topic_result, session_date: str):
             current_mistakes = [str(current_mistakes)]
 
         current_mistakes.extend(topic_result["mistakes"])
-        data["mistakes"] = current_mistakes
+        data["mistakes"] = current_mistakes[-20:]  # 直近20件のみ保持
 
     write_frontmatter(path, data, body)
 

@@ -55,7 +55,7 @@ def test_category_probability_frequency_weighted():
     records = [
         {
             "topic_name": "交際費等",
-            "category": "損金算入",
+            "category": "交際費等・隣接費用",
             "status": "学習中",
             "stage": "学習中",
             "importance": "A",
@@ -66,7 +66,7 @@ def test_category_probability_frequency_weighted():
         },
         {
             "topic_name": "交際費等",
-            "category": "損金算入",
+            "category": "交際費等・隣接費用",
             "status": "学習中",
             "stage": "学習中",
             "importance": "C",
@@ -78,14 +78,14 @@ def test_category_probability_frequency_weighted():
         },
     ]
     data = build_category_dashboard(records, generated_at)
-    row = next(c for c in data["categories"] if c["name"] == "損金算入")
+    row = next(c for c in data["categories"] if c["name"] == "交際費等・隣接費用")
 
     # A(重み3)の高確率寄与が大きいため 0.5 を上回る
     assert row["graduation_probability"] > 0.5
 
 
-def test_dashboard_contains_all_15_categories():
+def test_dashboard_contains_all_categories():
     data = build_category_dashboard([], datetime(2026, 2, 21, 10, 32, 15))
     names = [c["name"] for c in data["categories"]]
-    assert len(names) == 15
+    assert len(names) == len(PARENT_CATEGORIES)
     assert names == list(PARENT_CATEGORIES)

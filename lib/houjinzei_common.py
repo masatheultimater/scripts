@@ -26,6 +26,7 @@ EXCLUDED_STATUSES = frozenset({"卒業"})
 # 卒業判定パラメータ
 GRADUATION_GAP_DAYS = 25
 GRADUATION_MIN_KOME = 4
+GRADUATION_MIN_CALC_CORRECT = 2  # 最低正解回数（卒業に必要）
 KOME_THRESHOLD_REVIEW = 16  # kome_total >= 16 で stage=復習中
 
 # 間隔反復スケジュール（interval_index → 復習間隔日数）
@@ -47,7 +48,7 @@ ENRICH_TIMEOUT = 120  # 秒: claude -p
 DEFAULT_QUIZ_LIMIT = 20
 MAX_DAILY_PROBLEMS = 40  # 1日あたりの出題問題数上限
 MAX_CARRYOVER = 15  # 繰越問題の上限
-CARRYOVER_EXPIRY_DAYS = 2  # 繰越の有効日数
+CARRYOVER_EXPIRY_DAYS = 7  # 繰越の有効日数
 LOG_RETENTION_DAYS = 30
 
 # スケジュール連動出題
@@ -175,13 +176,18 @@ def next_review_days(interval_index: int) -> int:
     return INTERVAL_DAYS[interval_index]
 
 
-def is_graduation_ready(interval_index: int, kome_total: int) -> bool:
+def is_graduation_ready(interval_index: int, kome_total: int, calc_correct: int = 999) -> bool:
     """卒業条件を満たしているか判定する。
 
-    interval_index == GRADUATION_INTERVAL_INDEX (4) かつ
-    kome_total >= GRADUATION_MIN_KOME
+    interval_index >= GRADUATION_INTERVAL_INDEX (4) かつ
+    kome_total >= GRADUATION_MIN_KOME かつ
+    calc_correct >= GRADUATION_MIN_CALC_CORRECT
     """
-    return interval_index >= GRADUATION_INTERVAL_INDEX and kome_total >= GRADUATION_MIN_KOME
+    return (
+        interval_index >= GRADUATION_INTERVAL_INDEX
+        and kome_total >= GRADUATION_MIN_KOME
+        and calc_correct >= GRADUATION_MIN_CALC_CORRECT
+    )
 
 
 # ─── Answer Processing ────────────────────────────────
@@ -205,9 +211,18 @@ def process_answer(
 
     current_status = str(data.get("status", "未着手"))
 
-    # 卒業済みノートは変更しない
+    # 卒業済みノートでも不正解なら降格
     if current_status == "卒業":
         data["last_practiced"] = answer_date
+        if not correct:
+            # 卒業取消: 不正解で復習中に戻す
+            data["status"] = "復習中"
+            interval_index = max(0, to_int(data.get("interval_index", 0)) - 2)
+            data["interval_index"] = interval_index
+            calc_wrong = to_int(data.get("calc_wrong", 0)) + 1
+            data["calc_wrong"] = calc_wrong
+            data["stage"] = "復習中"
+            return data
         data["stage"] = data.get("stage", "卒業済")
         return data
 
@@ -233,7 +248,8 @@ def process_answer(
 
         # 卒業判定: interval_index ベース
         graduated = False
-        if interval_index >= GRADUATION_INTERVAL_INDEX and kome_total >= GRADUATION_MIN_KOME:
+        effective_calc_correct = calc_correct + 1  # +1 for this correct answer
+        if interval_index >= GRADUATION_INTERVAL_INDEX and kome_total >= GRADUATION_MIN_KOME and effective_calc_correct >= GRADUATION_MIN_CALC_CORRECT:
             graduated = True
 
         # レガシーフォールバック: gap ベース

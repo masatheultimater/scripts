@@ -118,30 +118,47 @@ const BOOK_ORDER = [
   "法人計算問題集1-1", "法人計算問題集1-2",
   "法人計算問題集2-1", "法人計算問題集2-2",
   "法人計算問題集3-1", "法人計算問題集3-2",
+  "法人計算問題集4-1",
   "法人理論問題集",
 ];
 const BOOK_SHORT = {
   "法人計算問題集1-1": "計算1-1", "法人計算問題集1-2": "計算1-2",
   "法人計算問題集2-1": "計算2-1", "法人計算問題集2-2": "計算2-2",
   "法人計算問題集3-1": "計算3-1", "法人計算問題集3-2": "計算3-2",
+  "法人計算問題集4-1": "計算4-1",
   "法人理論問題集": "理論",
 };
 const DASHBOARD_CATEGORIES = [
-  "損金算入",
-  "所得計算",
-  "その他",
-  "グループ法人",
+  "役員給与",
+  "減価償却",
+  "交際費等・隣接費用",
+  "寄附金",
+  "繰延資産・リース",
+  "借地権",
+  "その他損金",
   "益金不算入",
+  "別表調整",
+  "有価証券・棚卸",
+  "外貨・収益認識",
+  "租税公課・消費税",
+  "税務調整・税効果",
+  "総合問題",
+  "評価損益",
+  "収用等・買換え",
+  "保険差益・国庫補助金",
+  "特別償却",
+  "グループ法人",
   "組織再編",
-  "税額計算",
-  "国際課税",
+  "税額控除",
+  "留保金課税",
+  "資本等取引",
+  "引当金・準備金",
   "総則・定義",
   "欠損金",
   "申告納付等",
-  "圧縮記帳等",
+  "国際課税",
   "通算制度",
-  "資本等取引",
-  "引当金・準備金",
+  "その他",
 ];
 
 // ── Card component ──
@@ -525,6 +542,26 @@ function DashboardView({ dashboardData, onBack }) {
           <StatNum value={`${Math.round((totals.overall_accuracy || 0) * 100)}%`} label="正答率" color={C.yellow} />
         </div>
 
+        {/* Weak Topics Section */}
+        {dashboardData?.weak_topics && dashboardData.weak_topics.length > 0 && (
+          <div style={{ background: C.surface, border: `1px solid ${C.red}30`, borderRadius: 14, padding: "14px 16px", marginBottom: 16 }}>
+            <div style={{ color: C.red, fontSize: 13, fontWeight: 700, marginBottom: 10 }}>弱点トピック TOP{dashboardData.weak_topics.length}</div>
+            {dashboardData.weak_topics.map((t, i) => (
+              <div key={t.topic_id || i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: i < dashboardData.weak_topics.length - 1 ? `1px solid ${C.border}` : "none" }}>
+                <span style={{ color: C.red, fontSize: 14, fontWeight: 700, width: 20, textAlign: "right", flexShrink: 0 }}>{i + 1}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ color: C.text, fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.topic_name}</div>
+                  <div style={{ color: C.text3, fontSize: 10 }}>{t.category}</div>
+                </div>
+                <div style={{ flexShrink: 0, textAlign: "right" }}>
+                  <div style={{ color: C.red, fontSize: 12, fontWeight: 700 }}>{t.calc_wrong}回不正解</div>
+                  <div style={{ color: C.text3, fontSize: 10 }}>{t.calc_correct}正解 / gap {t.wrong_gap}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {categories.map((cat) => {
             const sc = cat.stage_counts || {};
@@ -546,7 +583,7 @@ function DashboardView({ dashboardData, onBack }) {
                 </div>
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                  <div style={{ color: C.text2, fontSize: 11 }}>正答率 {Math.round((cat.accuracy || 0) * 100)}%</div>
+                  <div style={{ color: C.text2, fontSize: 11 }}>正答 {cat.calc_correct || 0}/{(cat.calc_correct || 0) + (cat.calc_wrong || 0)}</div>
                   <div style={{ color: C.text2, fontSize: 11 }}>卒業確率 {Math.round((cat.graduation_probability || 0) * 100)}%</div>
                   <div style={{ color: (cat.focus_active_topics || 0) > 0 ? C.red : C.text3, fontSize: 11, textAlign: "right" }}>
                     フォーカス {(cat.focus_active_topics || 0)}件
@@ -823,6 +860,7 @@ function App() {
   const [logTime, setLogTime] = useState("");
   const [logMistakes, setLogMistakes] = useState({});
   const [logMemo, setLogMemo] = useState("");
+  const [editingAttempt, setEditingAttempt] = useState(null); // attempt being edited
 
   // Today's problems state
   const [todayData, setTodayData] = useState(null);
@@ -845,11 +883,16 @@ function App() {
   const [theoryBank, setTheoryBank] = useState([]);
   const [theoryQuiz, setTheoryQuiz] = useState(null); // { questions: [], current: 0, answers: [] }
   const [theoryFilter, setTheoryFilter] = useState("all"); // category filter
+  const [theoryAttempts, setTheoryAttempts] = useState(() => load("kk3-theory-attempts", []));
+  const [pendingSync, setPendingSync] = useState(() => load("kk3-pending-sync", []));
 
   // Settings
   const [apiTokenInput, setApiTokenInput] = useState("");
   const [apiUrlInput, setApiUrlInput] = useState("");
   const [scheduleCategories, setScheduleCategories] = useState([]);
+  const [maxDailyProblems, setMaxDailyProblems] = useState(40);
+  const [calcCount, setCalcCount] = useState(20);
+  const [theoryCount, setTheoryCount] = useState(10);
 
   // ── Init ──
   useEffect(() => {
@@ -915,6 +958,9 @@ function App() {
             const schData = await apiFetch(`${apiBase(savedUrl)}/api/komekome/schedule`, savedToken);
             if (schData && Array.isArray(schData.scope_categories)) {
               setScheduleCategories(schData.scope_categories);
+              if (schData.max_daily_problems > 0) setMaxDailyProblems(schData.max_daily_problems);
+              if (schData.calc_count > 0) setCalcCount(schData.calc_count);
+              if (schData.theory_count > 0) setTheoryCount(schData.theory_count);
             }
           } catch {}
           // Load theory bank
@@ -954,15 +1000,55 @@ function App() {
 
   // ── Save attempts on change ──
   useEffect(() => { if (loaded) save("kk3-attempts", attempts); }, [attempts, loaded]);
+  useEffect(() => { if (loaded) save("kk3-theory-attempts", theoryAttempts); }, [theoryAttempts, loaded]);
+  useEffect(() => { if (loaded) save("kk3-pending-sync", pendingSync); }, [pendingSync, loaded]);
+
+  // ── Retry pending sync on load ──
+  useEffect(() => {
+    if (!loaded || pendingSync.length === 0) return;
+    const token = load("kk3-api-token", "");
+    const url = load("kk3-api-url", "");
+    if (!token) return;
+    (async () => {
+      try {
+        await apiFetch(`${apiBase(url)}/api/komekome/attempts`, token, {
+          method: "POST", body: JSON.stringify(pendingSync),
+        });
+        setPendingSync([]);
+      } catch { /* will retry next load */ }
+    })();
+  }, [loaded]);
+
+  // ── Save theory quiz result when quiz completes ──
+  useEffect(() => {
+    if (!theoryQuiz) return;
+    const { questions, current, answers } = theoryQuiz;
+    if (current < questions.length) return;
+    // Quiz just completed - save the attempt
+    const attempt = {
+      id: `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
+      date: today(),
+      category: theoryFilter || "all",
+      total: questions.length,
+      correct: answers.filter(a => a.correct).length,
+      questions: questions.map((q, i) => ({
+        id: q.id,
+        topic_id: q.topic_id,
+        correct: answers[i] ? answers[i].correct : false,
+      })),
+    };
+    setTheoryAttempts(prev => [attempt, ...prev].slice(0, 200));
+  }, [theoryQuiz?.current]);
 
   // ── Derived data ──
   const problemList = useMemo(() => Object.values(problems), [problems]);
   const bookProblems = useMemo(() => {
     if (!logBook) return [];
     return problemList.filter(p => p.book === logBook).sort((a, b) => {
-      // Sort by page, then by number
-      if (a.page !== b.page) return a.page - b.page;
-      return a.number.localeCompare(b.number, "ja");
+      // Sort by ID numeric suffix (e.g. calc-4-1-031 < calc-4-1-101)
+      const na = parseInt(a.id.match(/(\d+)$/)?.[1] || "0", 10);
+      const nb = parseInt(b.id.match(/(\d+)$/)?.[1] || "0", 10);
+      return na - nb;
     });
   }, [problemList, logBook]);
 
@@ -1015,16 +1101,53 @@ function App() {
     const url = load("kk3-api-url", "");
     if (token) {
       try { await apiFetch(`${apiBase(url)}/api/komekome/attempts`, token, { method: "POST", body: JSON.stringify([attempt]) }); }
-      catch { /* stored locally, will sync later */ }
+      catch { setPendingSync(prev => [...prev, attempt]); }
     }
 
     // Reset and go to confirmation
     setView("logged");
   }, [logProblem, logResult, logTime, logMistakes, logMemo, attempts]);
 
+  const updateAttempt = useCallback(async () => {
+    if (!editingAttempt || !logResult) return;
+    const selectedMistakes = Object.entries(logMistakes).filter(([, v]) => v).map(([k]) => k);
+    const updated = {
+      ...editingAttempt,
+      result: logResult,
+      time_min: parseInt(logTime) || 0,
+      mistakes: logResult === "×" ? selectedMistakes : [],
+      memo: logMemo.trim(),
+    };
+    const newAttempts = attempts.map(a => a.id === updated.id ? updated : a);
+    setAttempts(newAttempts);
+
+    const token = load("kk3-api-token", "");
+    const url = load("kk3-api-url", "");
+    if (token) {
+      try { await apiFetch(`${apiBase(url)}/api/komekome/attempts`, token, { method: "PUT", body: JSON.stringify(updated) }); }
+      catch { /* stored locally, will sync later */ }
+    }
+    setEditingAttempt(null);
+    setView("logged");
+  }, [editingAttempt, logResult, logTime, logMistakes, logMemo, attempts]);
+
+  const startEditAttempt = useCallback((attempt) => {
+    const p = problems[attempt.problem_id];
+    setEditingAttempt(attempt);
+    setLogProblem(p || { id: attempt.problem_id, title: attempt.problem_id, book: "", number: "", type: "calc" });
+    setLogResult(attempt.result);
+    setLogTime(attempt.time_min > 0 ? String(attempt.time_min) : "");
+    const mObj = {};
+    (attempt.mistakes || []).forEach(m => { mObj[m] = true; });
+    setLogMistakes(mObj);
+    setLogMemo(attempt.memo || "");
+    setView("log-result");
+  }, [problems]);
+
   const resetLog = useCallback(() => {
     setLogBook(null); setLogProblem(null); setLogResult(null);
     setLogTime(""); setLogMistakes({}); setLogMemo("");
+    setEditingAttempt(null);
   }, []);
 
   const resetPageView = useCallback(() => {
@@ -1051,7 +1174,7 @@ function App() {
     const url = load("kk3-api-url", "");
     if (token) {
       try { await apiFetch(`${apiBase(url)}/api/komekome/attempts`, token, { method: "POST", body: JSON.stringify([attempt]) }); }
-      catch {}
+      catch { setPendingSync(prev => [...prev, attempt]); }
     }
     if (result === "×") {
       setPageViewStep("review");
@@ -1125,21 +1248,51 @@ function App() {
                 </label>
               ))}
             </div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ color: C.text3, fontSize: 11, marginBottom: 6 }}>計算問題数</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <input type="range" min={0} max={60} step={5} value={calcCount}
+                  onChange={e => setCalcCount(Number(e.target.value))}
+                  style={{ flex: 1, accentColor: C.accent }} />
+                <span style={{ color: C.text, fontSize: 15, fontWeight: 700, minWidth: 28, textAlign: "right" }}>{calcCount}</span>
+              </div>
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ color: C.text3, fontSize: 11, marginBottom: 6 }}>理論問題数</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <input type="range" min={0} max={60} step={5} value={theoryCount}
+                  onChange={e => setTheoryCount(Number(e.target.value))}
+                  style={{ flex: 1, accentColor: C.accent }} />
+                <span style={{ color: C.text, fontSize: 15, fontWeight: 700, minWidth: 28, textAlign: "right" }}>{theoryCount}</span>
+              </div>
+            </div>
+            <div style={{ color: C.text3, fontSize: 11, marginBottom: 12, textAlign: "center" }}>合計: {calcCount + theoryCount}問</div>
+            <div id="schedule-msg" style={{ color: C.text3, fontSize: 11, marginBottom: 8, minHeight: 16 }}></div>
             <Btn onClick={async () => {
-              const token = load("kk3-api-token", "");
-              const url = load("kk3-api-url", "");
-              if (!token) return;
+              const msgEl = document.getElementById("schedule-msg");
+              const token = apiToken || load("kk3-api-token", "");
+              const url = apiUrl || load("kk3-api-url", "");
+              if (!token) { if (msgEl) msgEl.textContent = "トークン未設定"; return; }
+              if (msgEl) { msgEl.style.color = C.text3; msgEl.textContent = "保存 & 問題生成中..."; }
               try {
-                await apiFetch(`${apiBase(url)}/api/komekome/schedule`, token, {
+                const result = await apiFetch(`${apiBase(url)}/api/komekome/schedule`, token, {
                   method: "PUT",
                   body: JSON.stringify({
                     week_start: weekStart(today()),
                     scope_categories: scheduleCategories,
+                    max_daily_problems: calcCount + theoryCount,
+                    calc_count: calcCount,
+                    theory_count: theoryCount,
                   }),
                 });
-                setSyncMsg("スケジュール保存OK");
+                // Reload today data
+                try {
+                  const tdData = await apiFetch(`${apiBase(url)}/api/komekome/today`, token);
+                  if (tdData) { setTodayData(tdData); save("kk3-today", tdData); }
+                } catch {}
+                if (msgEl) { msgEl.style.color = C.green; msgEl.textContent = "保存OK — " + (result.total_problems || 0) + "問生成 (" + scheduleCategories.length + "カテゴリ)"; }
               } catch (e) {
-                setSyncMsg("スケジュール保存失敗: " + e.message);
+                if (msgEl) { msgEl.style.color = C.red; msgEl.textContent = "保存失敗: " + e.message; }
               }
             }} bg={C.accent} color="#fff" style={{ width: "100%", padding: "10px" }}>スケジュール保存</Btn>
           </div>
@@ -1150,14 +1303,18 @@ function App() {
 
   // ═══════ LOGGED (confirmation) ═══════
   if (view === "logged") {
+    const lastAttempt = attempts[0];
     return (
       <div style={{ background: C.bg, minHeight: "100vh", padding: "40px 16px", fontFamily: font }}>
         <div style={{ maxWidth: 480, margin: "0 auto", textAlign: "center" }}>
           <div style={{ fontSize: 48, marginBottom: 16 }}>{logResult === "○" ? "○" : "×"}</div>
-          <h2 style={{ color: C.text, fontSize: 20, fontWeight: 700, margin: "0 0 8px" }}>記録しました</h2>
+          <h2 style={{ color: C.text, fontSize: 20, fontWeight: 700, margin: "0 0 8px" }}>{editingAttempt ? "更新しました" : "記録しました"}</h2>
           <div style={{ color: C.text2, fontSize: 14, marginBottom: 24 }}>{logProblem?.title}</div>
-          <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
+          <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
             <Btn onClick={() => { resetLog(); setView("log-book"); }} bg={C.accent} color="#fff">続けて記録</Btn>
+            {lastAttempt && !editingAttempt && (
+              <Btn onClick={() => startEditAttempt(lastAttempt)} bg={C.surface} color={C.accent} style={{ border: `1px solid ${C.accent}40` }}>修正する</Btn>
+            )}
             <Btn onClick={() => { resetLog(); setView("home"); }} bg={C.surface} color={C.text2} style={{ border: `1px solid ${C.border}` }}>ホーム</Btn>
           </div>
         </div>
@@ -1254,7 +1411,15 @@ function App() {
       <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", fontFamily: font }}>
         <div style={{ flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch", padding: "20px 16px" }}>
           <div style={{ maxWidth: 480, margin: "0 auto" }}>
-            <button onClick={() => setView("log-problem")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← 問題選択</button>
+            <button onClick={() => { if (editingAttempt) { setEditingAttempt(null); resetLog(); setView("history"); } else { setView("log-problem"); } }} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>{editingAttempt ? "← 履歴" : "← 問題選択"}</button>
+
+            {/* Edit mode indicator */}
+            {editingAttempt && (
+              <div style={{ background: `${C.accent}15`, border: `1px solid ${C.accent}40`, borderRadius: 10, padding: "8px 14px", marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ color: C.accent, fontSize: 12, fontWeight: 600 }}>修正モード</span>
+                <span style={{ color: C.text3, fontSize: 11 }}>{editingAttempt.date}</span>
+              </div>
+            )}
 
             {/* Problem info */}
             <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "16px 18px", marginBottom: 12 }}>
@@ -1321,9 +1486,9 @@ function App() {
         {/* Submit button (fixed at bottom) */}
         <div style={{ padding: "10px 16px 14px", flexShrink: 0, background: C.bg, borderTop: `1px solid ${C.border}` }}>
           <div style={{ maxWidth: 480, margin: "0 auto" }}>
-            <Btn onClick={submitAttempt} disabled={!canSubmit}
+            <Btn onClick={editingAttempt ? updateAttempt : submitAttempt} disabled={!canSubmit}
               bg={canSubmit ? C.accent : C.surface3} color={canSubmit ? "#fff" : C.text3}
-              style={{ width: "100%", padding: "16px", fontSize: 16 }}>記録する</Btn>
+              style={{ width: "100%", padding: "16px", fontSize: 16 }}>{editingAttempt ? "更新する" : "記録する"}</Btn>
           </div>
         </div>
       </div>
@@ -1977,7 +2142,7 @@ function App() {
               {recentAttempts.map(a => {
                 const p = problems[a.problem_id];
                 return (
-                  <div key={a.id} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 14px" }}>
+                  <div key={a.id} onClick={() => startEditAttempt(a)} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 14px", cursor: "pointer", transition: "border-color 0.15s" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
                       <span style={{ color: a.result === "○" ? C.green : C.red, fontSize: 18, fontWeight: 700, width: 24 }}>{a.result}</span>
                       <div style={{ flex: 1 }}>
@@ -2182,6 +2347,9 @@ function App() {
             <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 6, marginTop: 6 }}>
               <div style={{ width: 6, height: 6, borderRadius: "50%", background: syncStatus === "synced" ? C.green : syncStatus === "error" ? C.red : C.text3 }} />
               <span style={{ color: C.text3, fontSize: 10 }}>{syncStatus === "synced" ? "Synced" : syncStatus === "offline" ? "Offline" : syncStatus === "error" ? "Error" : ""}</span>
+              {pendingSync.length > 0 && (
+                <span style={{ background: C.redDim, color: C.red, fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 8 }}>{pendingSync.length}件未同期</span>
+              )}
             </div>
           )}
         </div>

@@ -106,6 +106,8 @@ def build_category_dashboard(records: list[dict], generated_at: datetime) -> dic
             "focus_active_topics": 0,
             "frequency_weight_sum": 0,
             "updated_at": now.strftime("%Y-%m-%dT%H:%M:%S"),
+            "calc_correct": 0,
+            "calc_wrong": 0,
             "_attempts": 0,
             "_correct": 0,
             "_weighted_p_sum": 0.0,
@@ -117,6 +119,7 @@ def build_category_dashboard(records: list[dict], generated_at: datetime) -> dic
     total_correct = 0
     attempted_topics = 0
     graduated_topics = 0
+    all_topic_stats = []
 
     for r in records:
         category = str(r.get("category", "")).strip() or get_parent_category(str(r.get("topic_name", "")).strip())
@@ -147,8 +150,24 @@ def build_category_dashboard(records: list[dict], generated_at: datetime) -> dic
         bucket["_correct"] += correct
         bucket["_weighted_p_sum"] += p * freq
         bucket["frequency_weight_sum"] += freq
+        bucket["calc_correct"] += correct
+        bucket["calc_wrong"] += wrong
         if focus_active:
             bucket["focus_active_topics"] += 1
+
+        wrong_gap = max(wrong - correct, 0)
+        if attempts > 0 and wrong_gap > 0:
+            all_topic_stats.append({
+                "topic_id": str(r.get("topic_id", "")),
+                "topic_name": str(r.get("topic_name", "")),
+                "category": category,
+                "calc_correct": correct,
+                "calc_wrong": wrong,
+                "wrong_gap": wrong_gap,
+                "interval_index": to_int(r.get("interval_index", 0)),
+                "focus_active": focus_active,
+                "importance": str(r.get("importance", "")),
+            })
 
         total_attempts += attempts
         total_correct += correct
@@ -168,6 +187,10 @@ def build_category_dashboard(records: list[dict], generated_at: datetime) -> dic
         b.pop("_weighted_p_sum", None)
         categories.append(b)
 
+    # Weak topics: top 10 by wrong_gap
+    all_topic_stats.sort(key=lambda t: (-t["wrong_gap"], -t["calc_wrong"]))
+    weak_topics = all_topic_stats[:10]
+
     return {
         "version": 1,
         "generated_at": generated_at.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -179,6 +202,7 @@ def build_category_dashboard(records: list[dict], generated_at: datetime) -> dic
             "overall_accuracy": (total_correct / total_attempts) if total_attempts else 0.0,
         },
         "categories": categories,
+        "weak_topics": weak_topics,
     }
 
 
@@ -216,3 +240,20 @@ def render_obsidian_dashboard_md(dashboard_data: dict) -> str:
         )
 
     return "\n".join(lines) + "\n"
+
+
+def dynamic_new_review_ratio(records: list[dict], base_ratio: float = 0.5) -> float:
+    """Adjust new/review ratio based on overall accuracy.
+
+    High accuracy (>90%) -> more new topics (up to 60%)
+    Low accuracy (<70%) -> more review (down to 20% new)
+    """
+    total_correct = sum(to_int(r.get("calc_correct", 0)) for r in records)
+    total_wrong = sum(to_int(r.get("calc_wrong", 0)) for r in records)
+    total = total_correct + total_wrong
+    if total < 10:
+        return base_ratio  # Not enough data
+    accuracy = total_correct / total
+    # Linear interpolation: 70% accuracy -> 0.2, 90% -> 0.6
+    ratio = clamp(0.2 + (accuracy - 0.7) * 2.0, 0.2, 0.6)
+    return ratio
