@@ -343,6 +343,14 @@ def update_topic_note(path: Path, topic_result, session_date: str):
         current_mistakes.extend(topic_result["mistakes"])
         data["mistakes"] = current_mistakes[-20:]  # 直近20件のみ保持
 
+    # Cleanup expired focus_until_at
+    fu_raw = data.get("focus_until_at")
+    if fu_raw:
+        fu_dt = parse_dt_or_none(fu_raw)
+        if fu_dt and now > fu_dt:
+            data.pop("focus_until_at", None)
+            data.pop("focus_reason", None)
+
     write_frontmatter(path, data, body)
 
 
