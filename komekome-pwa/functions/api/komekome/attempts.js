@@ -8,7 +8,7 @@ function corsHeaders(request) {
   const allowed = origin === ALLOWED_ORIGIN || origin === "" ? ALLOWED_ORIGIN : origin;
   return {
     "Access-Control-Allow-Origin": allowed,
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type",
   };
 }
@@ -67,6 +67,34 @@ export async function onRequestPost(context) {
   await env.KOMEKOME_STORE.put("attempts_all", JSON.stringify(merged));
 
   return json({ ok: true, added: toAdd.length, total: merged.length }, 200, request);
+}
+
+export async function onRequestPut(context) {
+  const { request, env } = context;
+  if (!verifyToken(request, env)) return unauthorized(request);
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "Invalid JSON body" }, 400, request);
+  }
+
+  if (!body.id) {
+    return json({ error: "Must provide attempt id" }, 400, request);
+  }
+
+  const existing = (await env.KOMEKOME_STORE.get("attempts_all", "json")) || [];
+  const idx = existing.findIndex(a => a.id === body.id);
+  if (idx === -1) {
+    return json({ error: "Attempt not found" }, 404, request);
+  }
+
+  // Merge: keep original fields, overwrite with provided fields
+  existing[idx] = { ...existing[idx], ...body };
+  await env.KOMEKOME_STORE.put("attempts_all", JSON.stringify(existing));
+
+  return json({ ok: true, updated: existing[idx] }, 200, request);
 }
 
 export async function onRequestOptions(context) {

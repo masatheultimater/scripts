@@ -58,6 +58,9 @@ LOCKFILE="/tmp/houjinzei_vault.lock"
 exec 200>"$LOCKFILE"
 flock -n 200 || { echo "エラー: 別のスクリプトが実行中です" >&2; exit 1; }
 
+# Step 0: KV から最新スケジュールを pull
+HOUJINZEI_LOCK_HELD=1 bash "$SCRIPTS_DIR/komekome_sync.sh" pull-schedule || echo "警告: pull-schedule 失敗（オフライン？）" >&2
+
 # Step 1: topic_problem_map.json を生成/更新
 python3 -c "
 from lib.topic_problem_map import save_topic_problem_map
@@ -160,6 +163,17 @@ scope_categories = schedule.get("scope_categories", [])
 has_schedule = bool(scope_categories)
 if has_schedule:
     eprint(f"週間スケジュール: {scope_categories}")
+
+# スケジュールで問題数上限が指定されていればそれを使う
+schedule_max = schedule.get("max_daily_problems")
+if schedule_max is not None and isinstance(schedule_max, int) and schedule_max > 0:
+    MAX_DAILY_PROBLEMS = schedule_max
+    eprint(f"問題数上限(スケジュール): {MAX_DAILY_PROBLEMS}")
+
+SCHEDULE_CALC_COUNT = schedule.get("calc_count")
+SCHEDULE_THEORY_COUNT = schedule.get("theory_count")
+if SCHEDULE_CALC_COUNT is not None and SCHEDULE_THEORY_COUNT is not None:
+    eprint(f"計算/理論比率(スケジュール): 計算={SCHEDULE_CALC_COUNT}, 理論={SCHEDULE_THEORY_COUNT}")
 
 records = []
 for md in sorted(TOPIC_ROOT.rglob("*.md")):
@@ -446,13 +460,14 @@ if has_schedule:
 
 else:
     # No schedule: original bucket-based selection (unchanged)
-    # ---- 優先度0: 卒業後定期復習 (最大2問) ----
+    # ---- 優先度0: 卒業後定期復習 (最大3問, ローテーション) ----
     if graduated_review:
+        # Rotate: prioritize least-recently-practiced graduated topics
         ordered_graduated = sorted(
             graduated_review,
-            key=lambda r: (-calc_priority_score(r, 0, base_datetime), r["topic_id"]),
+            key=lambda r: (str(r.get("last_practiced", "")), r["topic_id"]),
         )
-        for r in ordered_graduated[:2]:
+        for r in ordered_graduated[:3]:
             if len(selected) >= LIMIT or selection_stopped_by_problem_cap:
                 break
             if r["topic_id"] in selected_ids:

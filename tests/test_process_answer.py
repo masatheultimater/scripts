@@ -106,16 +106,30 @@ def test_status_review_not_downgraded():
 # ─── 卒業判定（二重条件） ────────────────────────────────
 
 def test_graduation_by_interval():
-    """interval_index == GRADUATION_INTERVAL_INDEX-1 から正解 && kome >= 4 → status: 卒業"""
+    """interval_index == GRADUATION_INTERVAL_INDEX-1 から正解 && kome >= 4 && calc_correct+1 >= 2 → status: 卒業"""
     fm = _make_fm(
         interval_index=GRADUATION_INTERVAL_INDEX - 1,
         kome_total=GRADUATION_MIN_KOME,
+        calc_correct=1,  # +1 for this answer → effective 2 >= GRADUATION_MIN_CALC_CORRECT
         status="復習中",
         stage="復習中",
     )
     result = process_answer(fm, correct=True, answer_date="2026-02-20")
     assert result["status"] == "卒業"
     assert result["stage"] == "卒業済"
+
+
+def test_no_graduation_insufficient_calc_correct():
+    """interval_index十分でもcalc_correct+1 < 2なら卒業しない"""
+    fm = _make_fm(
+        interval_index=GRADUATION_INTERVAL_INDEX - 1,
+        kome_total=GRADUATION_MIN_KOME,
+        calc_correct=0,  # +1 for this answer → effective 1 < 2
+        status="復習中",
+        stage="復習中",
+    )
+    result = process_answer(fm, correct=True, answer_date="2026-02-20")
+    assert result["status"] != "卒業"
 
 
 def test_graduation_by_legacy_gap():
@@ -144,10 +158,20 @@ def test_no_graduation_insufficient_kome():
     assert result["status"] != "卒業"
 
 
-def test_graduated_not_rolled_back():
-    """卒業済みノートは不正解でもステータスが戻らない"""
+def test_graduated_rolled_back_on_wrong():
+    """卒業済みノートは不正解で復習中に降格する"""
     fm = _make_fm(status="卒業", stage="卒業済", kome_total=20, interval_index=4)
     result = process_answer(fm, correct=False, answer_date="2026-02-20")
+    assert result["status"] == "復習中"
+    assert result["stage"] == "復習中"
+    assert result["interval_index"] == 2  # 4 - 2 = 2
+    assert result["calc_wrong"] == 1
+
+
+def test_graduated_stays_on_correct():
+    """卒業済みノートは正解で卒業のまま"""
+    fm = _make_fm(status="卒業", stage="卒業済", kome_total=20, interval_index=4)
+    result = process_answer(fm, correct=True, answer_date="2026-02-20")
     assert result["status"] == "卒業"
     assert result["stage"] == "卒業済"
 
