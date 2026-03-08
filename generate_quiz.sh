@@ -96,6 +96,7 @@ from lib.houjinzei_common import (
 from lib.learning_efficiency import (
     build_category_dashboard,
     calc_priority_score,
+    dynamic_new_review_ratio,
     get_frequency_score,
     is_focus_active,
     parse_dt_or_none,
@@ -315,8 +316,10 @@ def add_priority_balanced(selected, selected_ids, candidates, reason, bucket, ma
 if has_schedule:
     # Schedule mode: split into new/review budgets
     remaining_budget = MAX_DAILY_PROBLEMS - carryover_count
+    actual_ratio = dynamic_new_review_ratio(records, NEW_REVIEW_RATIO)
+    eprint(f"動的比率: {actual_ratio:.2f} (ベース: {NEW_REVIEW_RATIO})")
     new_budget, review_budget = split_new_review_budget(
-        remaining_budget, NEW_REVIEW_RATIO, MIN_NEW_PROBLEMS, MIN_REVIEW_PROBLEMS,
+        remaining_budget, actual_ratio, MIN_NEW_PROBLEMS, MIN_REVIEW_PROBLEMS,
     )
     eprint(f"予算配分: 新規={new_budget}問, 復習={review_budget}問 (繰越={carryover_count}問)")
 

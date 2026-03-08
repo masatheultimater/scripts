@@ -510,7 +510,7 @@ function StatsView({ attempts, problems, problemList, onBack }) {
 }
 
 // ═══════ DASHBOARD VIEW ═══════
-function DashboardView({ dashboardData, onBack }) {
+function DashboardView({ dashboardData, theoryAttempts, onBack, onRefresh }) {
   const categories = useMemo(() => {
     const raw = Array.isArray(dashboardData?.categories) ? dashboardData.categories : [];
     const map = new Map(raw.map(c => [c.name, c]));
@@ -532,7 +532,10 @@ function DashboardView({ dashboardData, onBack }) {
     <div style={{ background: C.bg, minHeight: "100vh", padding: "20px 16px", fontFamily: font }}>
       <div style={{ maxWidth: 480, margin: "0 auto" }}>
         <button onClick={onBack} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← 戻る</button>
-        <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 4px" }}>カテゴリ進捗</h2>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: "0 0 4px" }}>カテゴリ進捗</h2>
+          {onRefresh && <button onClick={onRefresh} style={{ background: "none", border: `1px solid ${C.border}`, borderRadius: 8, color: C.text3, fontSize: 12, padding: "4px 10px", cursor: "pointer", fontFamily: font }}>更新</button>}
+        </div>
         <div style={{ color: C.text3, fontSize: 11, marginBottom: 12 }}>{dashboardData?.generated_date || "-"}</div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
@@ -561,6 +564,42 @@ function DashboardView({ dashboardData, onBack }) {
             ))}
           </div>
         )}
+
+        {/* Theory Stats */}
+        {theoryAttempts && theoryAttempts.length > 0 && (() => {
+          const recent = theoryAttempts.slice(0, 50);
+          const totalQ = recent.reduce((s, a) => s + a.total, 0);
+          const totalC = recent.reduce((s, a) => s + a.correct, 0);
+          const acc = totalQ > 0 ? Math.round(totalC / totalQ * 100) : 0;
+          const byCat = {};
+          recent.forEach(a => {
+            if (!byCat[a.category]) byCat[a.category] = { total: 0, correct: 0 };
+            byCat[a.category].total += a.total;
+            byCat[a.category].correct += a.correct;
+          });
+          const catEntries = Object.entries(byCat).sort((a, b) => {
+            const accA = a[1].total > 0 ? a[1].correct / a[1].total : 1;
+            const accB = b[1].total > 0 ? b[1].correct / b[1].total : 1;
+            return accA - accB;
+          });
+          return (
+            <div style={{ background: C.surface, border: `1px solid ${C.purple}30`, borderRadius: 14, padding: "14px 16px", marginBottom: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <span style={{ color: C.purple, fontSize: 13, fontWeight: 700 }}>理論○× 正答率</span>
+                <span style={{ color: C.text2, fontSize: 12, fontWeight: 700 }}>{acc}% ({totalC}/{totalQ})</span>
+              </div>
+              {catEntries.slice(0, 5).map(([cat, s]) => {
+                const catAcc = s.total > 0 ? Math.round(s.correct / s.total * 100) : 0;
+                return (
+                  <div key={cat} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.text, fontSize: 12 }}>{cat === "all" ? "全カテゴリ" : cat}</span>
+                    <span style={{ color: catAcc < 60 ? C.red : catAcc < 80 ? C.yellow : C.green, fontSize: 12, fontWeight: 600 }}>{catAcc}% ({s.correct}/{s.total})</span>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {categories.map((cat) => {
@@ -2124,7 +2163,15 @@ function App() {
 
   // ═══════ DASHBOARD ═══════
   if (view === "dashboard") {
-    return <DashboardView dashboardData={dashboardData} onBack={() => setView("home")} />;
+    return <DashboardView dashboardData={dashboardData} theoryAttempts={theoryAttempts} onBack={() => setView("home")} onRefresh={async () => {
+      const token = load("kk3-api-token", "");
+      const url = load("kk3-api-url", "");
+      if (!token) return;
+      try {
+        const d = await apiFetch(`${apiBase(url)}/api/komekome/dashboard`, token);
+        if (d) { setDashboardData(d); save("kk3-dashboard", d); }
+      } catch {}
+    }} />;
   }
 
   // ═══════ HISTORY ═══════
