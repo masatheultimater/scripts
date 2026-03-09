@@ -2025,6 +2025,33 @@ function App() {
       );
     }
 
+    if (pageViewStep === "time-correct") {
+      return (
+        <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", fontFamily: font }}>
+          <div style={{ flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch", padding: "20px 16px" }}>
+            <div style={{ maxWidth: 480, margin: "0 auto" }}>
+              <button onClick={() => setPageViewStep("view")} style={{ background: "none", border: "none", color: C.text3, fontSize: 14, cursor: "pointer", fontFamily: font, padding: 8, marginBottom: 8 }}>← 戻る</button>
+              <div style={{ color: C.green, fontSize: 18, fontWeight: 700, textAlign: "center", marginBottom: 12 }}>○ 正解</div>
+              <div style={{ color: C.text2, fontSize: 13, textAlign: "center", marginBottom: 16 }}>{todayProblem.title || `${BOOK_SHORT[todayProblem.book]} ${todayProblem.number}`}</div>
+
+              {/* Time input */}
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 18px", marginBottom: 12 }}>
+                <div style={{ color: C.text3, fontSize: 10, fontWeight: 600, letterSpacing: 1, marginBottom: 8 }}>所要時間（分）</div>
+                <input type="number" inputMode="numeric" value={pvTime} onChange={e => setPvTime(e.target.value)}
+                  placeholder={todayProblem.time_min > 0 ? `目安 ${todayProblem.time_min}分` : "分"}
+                  style={{ width: "100%", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, padding: "10px 14px", fontSize: 16, fontFamily: font, boxSizing: "border-box", outline: "none", textAlign: "center" }} />
+              </div>
+            </div>
+          </div>
+          <div style={{ padding: "10px 16px 14px", flexShrink: 0, background: C.bg, borderTop: `1px solid ${C.border}` }}>
+            <div style={{ maxWidth: 480, margin: "0 auto" }}>
+              <Btn onClick={() => submitPageViewAttempt("○")} bg={C.green} color="#fff" style={{ width: "100%", padding: "16px", fontSize: 16 }}>記録する</Btn>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     if (pageViewStep === "mistakes") {
       return (
         <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", fontFamily: font }}>
@@ -2140,7 +2167,7 @@ function App() {
         {/* ○/× buttons fixed at bottom */}
         <div style={{ padding: "10px 16px 14px", flexShrink: 0, background: C.bg, borderTop: `1px solid ${C.border}` }}>
           <div style={{ maxWidth: 480, margin: "0 auto", display: "flex", gap: 12 }}>
-            <button onClick={() => submitPageViewAttempt("○")}
+            <button onClick={() => setPageViewStep("time-correct")}
               style={{ flex: 1, padding: "18px", borderRadius: 14, border: `2px solid ${C.green}`, background: C.greenDim, cursor: "pointer", fontFamily: font }}>
               <div style={{ fontSize: 28, color: C.green, fontWeight: 700 }}>○</div>
               <div style={{ color: C.green, fontSize: 12, marginTop: 2 }}>正解</div>

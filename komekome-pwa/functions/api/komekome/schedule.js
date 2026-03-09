@@ -117,6 +117,7 @@ function buildTodayProblems(selected, schedule) {
       page: p.page,
       time_min: p.time_min,
       rank: p.rank,
+      page_image_key: p.page ? `${p.book}/${String(p.page).padStart(3, "0")}.webp` : null,
     });
   }
 
