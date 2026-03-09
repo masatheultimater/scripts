@@ -885,7 +885,8 @@ function StatusBadge({ status }) {
 function App() {
   const [problems, setProblems] = useState({});
   const [attempts, setAttempts] = useState([]);
-  const [view, setView] = useState("home");
+  const [view, _setView] = useState("home");
+  const setView = useCallback((v) => { _setView(v); window.scrollTo(0, 0); }, []);
   const [loaded, setLoaded] = useState(false);
   const [apiToken, setApiToken] = useState("");
   const [apiUrl, setApiUrl] = useState("");
